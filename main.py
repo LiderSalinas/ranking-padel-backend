@@ -3,7 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
-from routers import parejas, desafios, jugadores, auth, ranking
+from routers import parejas, desafios, jugadores, auth, ranking, push
+from database import init_db
+
+app = FastAPI(title="Ranking Pádel Backend")
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
 
 app = FastAPI(title="Ranking Pádel Backend")
 
@@ -41,3 +49,4 @@ app.include_router(desafios.router, prefix="/desafios")
 app.include_router(jugadores.router, prefix="/jugadores")
 app.include_router(ranking.router)
 app.include_router(auth.router)  # /auth/...
+app.include_router(push.router)
