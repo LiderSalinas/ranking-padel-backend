@@ -10,6 +10,11 @@ from core.firebase_admin import send_push_to_tokens
 router = APIRouter(prefix="/push", tags=["Push"])
 
 
+def _is_probably_jwt(value: str) -> bool:
+    v = (value or "").strip()
+    return v.startswith("eyJ") and v.count(".") == 2
+
+
 @router.post("/token")
 def save_push_token(
     payload: PushTokenUpsert,
@@ -17,13 +22,25 @@ def save_push_token(
     jugador=Depends(get_current_jugador),
 ):
     token = (payload.fcm_token or "").strip()
+
+    # Validación base
     if not token or len(token) < 20:
         raise HTTPException(status_code=400, detail="FCM token inválido")
 
-    existing = db.query(PushToken).filter(PushToken.jugador_id == jugador.id).first()
-    if existing:
-        existing.fcm_token = token
-    else:
+    # Guard rail: evitar que un JWT se guarde por error
+    if _is_probably_jwt(token):
+        raise HTTPException(status_code=400, detail="FCM token inválido (parece JWT)")
+
+    # ✅ MULTI-DISPOSITIVO:
+    # Guardamos el token si NO existe ya para este jugador.
+    # (PC + Android + otros navegadores = múltiples filas)
+    existing = (
+        db.query(PushToken)
+        .filter(PushToken.jugador_id == jugador.id, PushToken.fcm_token == token)
+        .first()
+    )
+
+    if not existing:
         db.add(PushToken(jugador_id=jugador.id, fcm_token=token))
 
     db.commit()
@@ -40,7 +57,22 @@ def send_to_me(
     if not tokens:
         raise HTTPException(status_code=404, detail="Este jugador no tiene token registrado")
 
-    token_list = [t.fcm_token for t in tokens]
+    # Filtramos tokens inválidos (por si quedó basura vieja)
+    token_list = []
+    for t in tokens:
+        fcm = (t.fcm_token or "").strip()
+        if not fcm or len(fcm) < 20:
+            continue
+        if _is_probably_jwt(fcm):
+            continue
+        token_list.append(fcm)
+
+    if not token_list:
+        raise HTTPException(
+            status_code=400,
+            detail="Este jugador no tiene FCM tokens válidos guardados",
+        )
+
     result = send_push_to_tokens(
         token_list,
         title=payload.title,
@@ -61,7 +93,22 @@ def send_to_jugador(
     if not tokens:
         raise HTTPException(status_code=404, detail="Ese jugador no tiene token registrado")
 
-    token_list = [t.fcm_token for t in tokens]
+    # Filtramos tokens inválidos (por si quedó basura vieja)
+    token_list = []
+    for t in tokens:
+        fcm = (t.fcm_token or "").strip()
+        if not fcm or len(fcm) < 20:
+            continue
+        if _is_probably_jwt(fcm):
+            continue
+        token_list.append(fcm)
+
+    if not token_list:
+        raise HTTPException(
+            status_code=400,
+            detail="Ese jugador no tiene FCM tokens válidos guardados",
+        )
+
     result = send_push_to_tokens(
         token_list,
         title=payload.title,
