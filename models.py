@@ -11,12 +11,32 @@ from sqlalchemy import (
     Time,
     ForeignKey,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel, ConfigDict
 from database import Base
 
+class PushToken(Base):
+    __tablename__ = "push_tokens"
 
+    id = Column(Integer, primary_key=True, index=True)
+    jugador_id = Column(Integer, ForeignKey("jugadores.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    
+    token = Column(String, nullable=False)
+
+    platform = Column(String, nullable=True)   
+    user_agent = Column(String, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    jugador = relationship("Jugador", backref="push_tokens")
+
+    __table_args__ = (
+        UniqueConstraint("jugador_id", "token", name="uq_push_token_jugador_token"),
+    )
 class Jugador(Base):
     __tablename__ = "jugadores"
 
