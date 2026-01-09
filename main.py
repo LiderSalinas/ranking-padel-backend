@@ -5,15 +5,11 @@ from fastapi.responses import JSONResponse
 
 from routers import parejas, desafios, jugadores, auth, ranking, push
 from database import init_db
+init_db()
 
 app = FastAPI(title="Ranking Pádel Backend")
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
-
-app = FastAPI(title="Ranking Pádel Backend")
 
 # ✅ CORS (Local + Vercel + Ngrok)
 app.add_middleware(

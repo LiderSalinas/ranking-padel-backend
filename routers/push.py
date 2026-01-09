@@ -1,49 +1,38 @@
 # routers/push.py
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from database import get_db
 from core.security import get_current_jugador
-import models
-from schemas.push import PushTokenIn, PushTokenOut
+from schemas.push import PushTokenUpsert, PushTokenResponse
+from models import PushToken
 
 router = APIRouter(prefix="/push", tags=["Push"])
 
-@router.post("/token", response_model=PushTokenOut)
+
+@router.post(
+    "/token",
+    response_model=PushTokenResponse,
+    status_code=status.HTTP_200_OK,
+)
 def save_push_token(
-    payload: PushTokenIn,
-    request: Request,
+    payload: PushTokenUpsert,
     db: Session = Depends(get_db),
     jugador=Depends(get_current_jugador),
 ):
-    """
-    Guarda el token FCM asociado al jugador autenticado.
-    """
-    ua = payload.user_agent or request.headers.get("user-agent")
+    token = (payload.fcm_token or "").strip()
 
-    # Evita duplicados por UniqueConstraint
-    existing = (
-        db.query(models.PushToken)
-        .filter(
-            models.PushToken.jugador_id == jugador.id,
-            models.PushToken.token == payload.token,
-        )
-        .first()
-    )
+    # FCM token suele ser largo; min 20 es ok para validar rápido
+    if not token or len(token) < 20:
+        raise HTTPException(status_code=400, detail="FCM token inválido")
+
+    existing = db.query(PushToken).filter(PushToken.jugador_id == jugador.id).first()
 
     if existing:
-        # Actualizamos meta si cambió
-        existing.platform = payload.platform
-        existing.user_agent = ua
-        db.commit()
-        return {"ok": True}
+        existing.fcm_token = token
+    else:
+        db.add(PushToken(jugador_id=jugador.id, fcm_token=token))
 
-    row = models.PushToken(
-        jugador_id=jugador.id,
-        token=payload.token,
-        platform=payload.platform,
-        user_agent=ua,
-    )
-    db.add(row)
     db.commit()
-    return {"ok": True}
+
+    return PushTokenResponse(ok=True, jugador_id=jugador.id)

@@ -21,22 +21,21 @@ class PushToken(Base):
     __tablename__ = "push_tokens"
 
     id = Column(Integer, primary_key=True, index=True)
-    jugador_id = Column(Integer, ForeignKey("jugadores.id", ondelete="CASCADE"), nullable=False, index=True)
 
     
-    token = Column(String, nullable=False)
+    jugador_id = Column(Integer, ForeignKey("jugadores.id"), nullable=False)
 
-    platform = Column(String, nullable=True)   
-    user_agent = Column(String, nullable=True)
+    
+    fcm_token = Column(String, nullable=False)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    jugador = relationship("Jugador", backref="push_tokens")
-
+    
     __table_args__ = (
-        UniqueConstraint("jugador_id", "token", name="uq_push_token_jugador_token"),
+        UniqueConstraint("jugador_id", name="uq_push_tokens_jugador_id"),
     )
+
+    jugador = relationship("Jugador", lazy="joined")
 class Jugador(Base):
     __tablename__ = "jugadores"
 
