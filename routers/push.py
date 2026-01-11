@@ -1,3 +1,4 @@
+# routers/push.py
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -18,17 +19,14 @@ def save_push_token(
 ):
     token = (payload.fcm_token or "").strip()
 
-    # validación mínima
     if not token or len(token) < 20:
         raise HTTPException(status_code=400, detail="FCM token inválido")
 
-    # ✅ MULTI-DEVICE: no pisar por jugador_id, sino guardar si es nuevo
     existing = (
         db.query(PushToken)
         .filter(PushToken.jugador_id == jugador.id, PushToken.fcm_token == token)
         .first()
     )
-
     if existing:
         return {"ok": True, "jugador_id": jugador.id, "saved": "already_exists"}
 
@@ -72,10 +70,7 @@ def send_to_jugador(
 
     token_list = [t.fcm_token for t in tokens if t.fcm_token and len(t.fcm_token) > 20]
     if not token_list:
-        raise HTTPException(
-            status_code=400,
-            detail="Ese jugador no tiene FCM tokens válidos guardados",
-        )
+        raise HTTPException(status_code=400, detail="Ese jugador no tiene FCM tokens válidos guardados")
 
     result = send_push_to_tokens(
         token_list,

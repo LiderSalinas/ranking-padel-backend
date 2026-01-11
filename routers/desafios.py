@@ -1,6 +1,6 @@
 # routers/desafios.py
 from datetime import date, timedelta
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import or_
@@ -14,6 +14,8 @@ from core.settings import settings
 from core.security import get_current_jugador
 from core.firebase_admin import send_push_to_tokens
 
+router = APIRouter(tags=["Desafios"])
+
 
 class ResultadoSets(BaseModel):
     set1_retador: int
@@ -24,9 +26,6 @@ class ResultadoSets(BaseModel):
     set3_desafiado: Optional[int] = None
 
 
-router = APIRouter(tags=["Desafios"])
-
-
 def _pareja_label(db: Session, pareja: Pareja) -> str:
     j1 = db.get(Jugador, pareja.jugador1_id)
     j2 = db.get(Jugador, pareja.jugador2_id)
@@ -35,22 +34,19 @@ def _pareja_label(db: Session, pareja: Pareja) -> str:
     return f"{n1} / {n2}"
 
 
-def _send_push_desafio_creado(background_tasks: BackgroundTasks, tokens: List[str], desafio: Desafio, title: str, body: str):
-    # background_tasks necesita función sync
+def _add_background_push(
+    background_tasks: BackgroundTasks,
+    tokens: List[str],
+    title: str,
+    body: str,
+    data: dict,
+) -> None:
     def _job():
-        send_push_to_tokens(
-            tokens,
-            title=title,
-            body=body,
-            data={
-                "type": "desafio",
-                "event": "created",
-                "desafio_id": str(desafio.id),
-                "estado": str(desafio.estado),
-                "fecha": str(desafio.fecha),
-                "hora": str(desafio.hora),
-            },
-        )
+        try:
+            send_push_to_tokens(tokens, title=title, body=body, data=data)
+        except Exception as e:
+            # No rompe el request aunque Firebase falle
+            print("❌ Error enviando push (background):", str(e))
 
     background_tasks.add_task(_job)
 
@@ -160,9 +156,10 @@ def crear_desafio(
         raise HTTPException(status_code=400, detail="Una pareja no puede desafiarse a sí misma.")
 
     if settings.STRICT_RULES:
+        # reglas duras después
         pass
 
-    # ✅ título "lindo" (AppSheet style)
+    # ✅ titulo estilo AppSheet
     label_retadora = _pareja_label(db, retadora)
     label_retada = _pareja_label(db, retada)
     titulo_desafio = f"{label_retadora} vs {label_retada}"
@@ -181,21 +178,49 @@ def crear_desafio(
     db.commit()
     db.refresh(nuevo_desafio)
 
-    # ✅ Buscar tokens de los 4 jugadores (multi-device)
-    jugador_ids = list({
-        retadora.jugador1_id,
-        retadora.jugador2_id,
+    # ✅ A QUIÉN NOTIFICAMOS:
+    # - retada (ambos)
+    # - compañero del retador (para que se entere)
+    # - excluimos al que creó (jugador_actual) para no duplicar
+    recipients: Set[int] = {
         retada.jugador1_id,
         retada.jugador2_id,
-    })
+        retadora.jugador1_id,
+        retadora.jugador2_id,
+    }
+    recipients.discard(jugador_actual.id)
 
-    tokens_rows = db.query(PushToken).filter(PushToken.jugador_id.in_(jugador_ids)).all()
+    tokens_rows = (
+        db.query(PushToken)
+        .filter(PushToken.jugador_id.in_(list(recipients)))
+        .all()
+    )
     token_list = [t.fcm_token for t in tokens_rows if t.fcm_token and len(t.fcm_token) > 20]
 
     if token_list:
         title = "🆕 Nuevo desafío"
-        body = f"⏱ {payload.fecha.strftime('%d/%m')} {str(payload.hora)[:5]}\n🎾 {titulo_desafio}\n👉 Toca para ver el detalle"
-        _send_push_desafio_creado(background_tasks, token_list, nuevo_desafio, title, body)
+        body = (
+            f"⏱ {payload.fecha.strftime('%d/%m')} {str(payload.hora)[:5]}\n"
+            f"🎾 {titulo_desafio}\n"
+            f"👉 Toca para ver el detalle"
+        )
+
+        _add_background_push(
+            background_tasks,
+            token_list,
+            title=title,
+            body=body,
+            data={
+                "type": "desafio",
+                "event": "created",
+                "desafio_id": str(nuevo_desafio.id),
+                "estado": str(nuevo_desafio.estado),
+                "fecha": str(nuevo_desafio.fecha),
+                "hora": str(nuevo_desafio.hora),
+                "retadora_pareja_id": str(retadora.id),
+                "retada_pareja_id": str(retada.id),
+            },
+        )
 
     return nuevo_desafio
 
@@ -281,7 +306,10 @@ def cargar_resultado(
     desafio.pos_retada_old = retada.posicion_actual
 
     if retador_gana:
-        retadora.posicion_actual, retada.posicion_actual = (retada.posicion_actual, retadora.posicion_actual)
+        retadora.posicion_actual, retada.posicion_actual = (
+            retada.posicion_actual,
+            retadora.posicion_actual,
+        )
         desafio.swap_aplicado = True
     else:
         desafio.swap_aplicado = False
@@ -297,7 +325,12 @@ def cargar_resultado(
 def listar_desafios_pareja(pareja_id: int, db: Session = Depends(get_db)):
     desafios = (
         db.query(Desafio)
-        .filter(or_(Desafio.retadora_pareja_id == pareja_id, Desafio.retada_pareja_id == pareja_id))
+        .filter(
+            or_(
+                Desafio.retadora_pareja_id == pareja_id,
+                Desafio.retada_pareja_id == pareja_id,
+            )
+        )
         .order_by(Desafio.fecha.desc(), Desafio.hora.desc())
         .all()
     )
