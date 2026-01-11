@@ -19,20 +19,17 @@ def save_push_token(
 ):
     token = (payload.fcm_token or "").strip()
 
+    
     if not token or len(token) < 20:
         raise HTTPException(status_code=400, detail="FCM token inválido")
 
-    existing = (
-        db.query(PushToken)
-        .filter(PushToken.jugador_id == jugador.id, PushToken.fcm_token == token)
-        .first()
-    )
-    if existing:
-        return {"ok": True, "jugador_id": jugador.id, "saved": "already_exists"}
+   
+    db.query(PushToken).filter(PushToken.jugador_id == jugador.id).delete()
 
     db.add(PushToken(jugador_id=jugador.id, fcm_token=token))
     db.commit()
-    return {"ok": True, "jugador_id": jugador.id, "saved": "inserted"}
+
+    return {"ok": True, "jugador_id": jugador.id, "saved": "replaced"}
 
 
 @router.post("/send-to-me")
