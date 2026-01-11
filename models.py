@@ -11,31 +11,27 @@ from sqlalchemy import (
     Time,
     ForeignKey,
     UniqueConstraint,
-    func,
 )
 from sqlalchemy.orm import relationship
-from pydantic import BaseModel, ConfigDict
 from database import Base
+
 
 class PushToken(Base):
     __tablename__ = "push_tokens"
 
     id = Column(Integer, primary_key=True, index=True)
-
-    
     jugador_id = Column(Integer, ForeignKey("jugadores.id"), nullable=False)
-
-    
     fcm_token = Column(String, nullable=False)
-
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    
+    # ✅ MULTI-DEVICE: unique por (jugador_id, fcm_token)
     __table_args__ = (
-        UniqueConstraint("jugador_id", name="uq_push_tokens_jugador_id"),
+        UniqueConstraint("jugador_id", "fcm_token", name="uq_push_tokens_jugador_fcm"),
     )
 
     jugador = relationship("Jugador", lazy="joined")
+
+
 class Jugador(Base):
     __tablename__ = "jugadores"
 
@@ -49,9 +45,7 @@ class Jugador(Base):
     activo = Column(Boolean, default=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relaciones con pareja
     parejas_como_j1 = relationship(
@@ -74,7 +68,6 @@ class Jugador(Base):
 class Pareja(Base):
     __tablename__ = "parejas"
 
-    # Evitar duplicar la misma pareja en el mismo grupo
     __table_args__ = (
         UniqueConstraint(
             "jugador1_id",
@@ -90,17 +83,14 @@ class Pareja(Base):
     jugador2_id = Column(Integer, ForeignKey("jugadores.id"), nullable=False)
     capitan_id = Column(Integer, ForeignKey("jugadores.id"), nullable=False)
 
-    grupo = Column(String(1), nullable=False)  # 'A', 'B', etc.
+    grupo = Column(String(1), nullable=False)
     posicion_actual = Column(Integer, nullable=True, index=True)
 
     activo = Column(Boolean, default=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relaciones hacia Jugador
     jugador1 = relationship(
         "Jugador",
         foreign_keys=[jugador1_id],
@@ -123,38 +113,29 @@ class Desafio(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # Pareja retadora y retada
     retadora_pareja_id = Column(Integer, ForeignKey("parejas.id"), nullable=False)
     retada_pareja_id = Column(Integer, ForeignKey("parejas.id"), nullable=False)
 
-    # Ganador (solo se completa cuando el partido se juega)
     ganador_pareja_id = Column(Integer, ForeignKey("parejas.id"), nullable=True)
 
-    # Pendiente / Aceptado / Rechazado / Jugado
     estado = Column(String(20), nullable=False, default="Pendiente")
 
-    # Fecha y hora del partido
     fecha = Column(Date, nullable=False)
     hora = Column(Time, nullable=False)
 
     observacion = Column(String(255), nullable=True)
 
-    # Campos para lógica de ranking (los usaremos después)
     limite_semana_ok = Column(Boolean, default=True)
     swap_aplicado = Column(Boolean, default=False)
     pos_retadora_old = Column(Integer, nullable=True)
     pos_retada_old = Column(Integer, nullable=True)
     ranking_aplicado = Column(Boolean, default=False)
 
-    # Título lindo para mostrar
     titulo_desafio = Column(String(255), nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relaciones
     retadora = relationship(
         "Pareja",
         foreign_keys=[retadora_pareja_id],

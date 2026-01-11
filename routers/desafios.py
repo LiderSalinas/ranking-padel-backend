@@ -1,26 +1,19 @@
 # routers/desafios.py
-
 from datetime import date, timedelta
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from database import get_db
-from models import Pareja, Desafio, Jugador
-
-from schemas.desafio import (
-    DesafioCreate,
-    DesafioResponse,
-    DesafioHistorialItem,
-)
-
+from models import Pareja, Desafio, Jugador, PushToken
+from schemas.desafio import DesafioCreate, DesafioResponse, DesafioHistorialItem
 from core.settings import settings
 from core.security import get_current_jugador
-from pydantic import BaseModel
-from typing import Optional
+from core.firebase_admin import send_push_to_tokens
+
 
 class ResultadoSets(BaseModel):
     set1_retador: int
@@ -31,14 +24,37 @@ class ResultadoSets(BaseModel):
     set3_desafiado: Optional[int] = None
 
 
+router = APIRouter(tags=["Desafios"])
 
-router = APIRouter(
-    tags=["Desafios"],  # OJO: SIN prefix acá, el prefix se pone en main.py
-)
 
-# -------------------------------------------------------------------
-# MIS PRÓXIMOS DESAFÍOS (Pendiente / Aceptado / Jugado del jugador autenticado)
-# -------------------------------------------------------------------
+def _pareja_label(db: Session, pareja: Pareja) -> str:
+    j1 = db.get(Jugador, pareja.jugador1_id)
+    j2 = db.get(Jugador, pareja.jugador2_id)
+    n1 = f"{j1.nombre} {j1.apellido}".strip() if j1 else f"Jugador {pareja.jugador1_id}"
+    n2 = f"{j2.nombre} {j2.apellido}".strip() if j2 else f"Jugador {pareja.jugador2_id}"
+    return f"{n1} / {n2}"
+
+
+def _send_push_desafio_creado(background_tasks: BackgroundTasks, tokens: List[str], desafio: Desafio, title: str, body: str):
+    # background_tasks necesita función sync
+    def _job():
+        send_push_to_tokens(
+            tokens,
+            title=title,
+            body=body,
+            data={
+                "type": "desafio",
+                "event": "created",
+                "desafio_id": str(desafio.id),
+                "estado": str(desafio.estado),
+                "fecha": str(desafio.fecha),
+                "hora": str(desafio.hora),
+            },
+        )
+
+    background_tasks.add_task(_job)
+
+
 @router.get("/mis-proximos", response_model=List[DesafioResponse])
 def mis_proximos(
     db: Session = Depends(get_db),
@@ -46,7 +62,6 @@ def mis_proximos(
 ):
     hoy = date.today()
 
-    # 1) Subquery con las parejas donde juega el jugador logueado
     parejas_ids_subq = (
         db.query(Pareja.id)
         .filter(
@@ -58,10 +73,7 @@ def mis_proximos(
         .subquery()
     )
 
-    # 2) Estados que queremos mostrar
     estados_visibles = ["Pendiente", "Aceptado", "Jugado"]
-
-    # 3) Limitar a la última semana (opcional)
     fecha_min = hoy - timedelta(days=7)
 
     query = (
@@ -80,22 +92,11 @@ def mis_proximos(
     return query.all()
 
 
-# -------------------------------------------------------------------
-# MIS DESAFÍOS (JUGADOR AUTENTICADO)
-# -------------------------------------------------------------------
-@router.get(
-    "/mis-desafios",
-    response_model=List[DesafioResponse],
-    summary="Listar desafíos donde participa el jugador autenticado",
-)
+@router.get("/mis-desafios", response_model=List[DesafioResponse])
 def listar_mis_desafios(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
-    """
-    Devuelve todos los desafíos donde el jugador autenticado participa,
-    ya sea como jugador1 o jugador2 de alguna pareja.
-    """
     parejas_ids_subq = (
         db.query(Pareja.id)
         .filter(
@@ -118,22 +119,11 @@ def listar_mis_desafios(
         .order_by(Desafio.fecha.desc(), Desafio.hora.desc())
         .all()
     )
-
     return desafios
 
 
-# -------------------------------------------------------------------
-# LISTAR PRÓXIMOS DESAFÍOS (Pendientes / Aceptados - general)
-# -------------------------------------------------------------------
-@router.get(
-    "/proximos",
-    response_model=List[DesafioResponse],
-    summary="Listar Próximos Desafíos (Pendientes / Aceptados)",
-)
+@router.get("/proximos", response_model=List[DesafioResponse])
 def listar_proximos_desafios(db: Session = Depends(get_db)):
-    """
-    Lista desafíos con estado Pendiente o Aceptado.
-    """
     desafios = (
         db.query(Desafio)
         .filter(Desafio.estado.in_(["Pendiente", "Aceptado"]))
@@ -143,30 +133,20 @@ def listar_proximos_desafios(db: Session = Depends(get_db)):
     return desafios
 
 
-# -------------------------------------------------------------------
-# CREAR DESAFÍO
-# -------------------------------------------------------------------
-@router.post(
-    "/",
-    response_model=DesafioResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Crear Desafío",
-)
-def crear_desafio(payload: DesafioCreate, db: Session = Depends(get_db)):
-    """
-    Crea un nuevo desafío entre dos parejas.
-    """
-
+@router.post("/", response_model=DesafioResponse, status_code=status.HTTP_201_CREATED)
+def crear_desafio(
+    payload: DesafioCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    jugador_actual: Jugador = Depends(get_current_jugador),
+):
     retadora = (
         db.query(Pareja)
         .filter(Pareja.id == payload.retadora_pareja_id, Pareja.activo.is_(True))
         .first()
     )
     if not retadora:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Pareja retadora no encontrada o inactiva.",
-        )
+        raise HTTPException(status_code=404, detail="Pareja retadora no encontrada o inactiva.")
 
     retada = (
         db.query(Pareja)
@@ -174,27 +154,18 @@ def crear_desafio(payload: DesafioCreate, db: Session = Depends(get_db)):
         .first()
     )
     if not retada:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Pareja retada no encontrada o inactiva.",
-        )
+        raise HTTPException(status_code=404, detail="Pareja retada no encontrada o inactiva.")
 
     if retadora.id == retada.id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Una pareja no puede desafiarse a sí misma.",
-        )
+        raise HTTPException(status_code=400, detail="Una pareja no puede desafiarse a sí misma.")
 
-    # --- Validaciones adicionales del reglamento (apagadas en desarrollo) ---
     if settings.STRICT_RULES:
-        # Acá vamos a ir metiendo reglas duras (3 puestos arriba, 2 partidos/semana, etc.)
         pass
 
-    # Generar titulo_desafio
-    if retadora.posicion_actual is not None and retada.posicion_actual is not None:
-        titulo_desafio = f"{retadora.posicion_actual} vs {retada.posicion_actual}"
-    else:
-        titulo_desafio = f"{retadora.id} vs {retada.id}"
+    # ✅ título "lindo" (AppSheet style)
+    label_retadora = _pareja_label(db, retadora)
+    label_retada = _pareja_label(db, retada)
+    titulo_desafio = f"{label_retadora} vs {label_retada}"
 
     nuevo_desafio = Desafio(
         retadora_pareja_id=retadora.id,
@@ -210,34 +181,32 @@ def crear_desafio(payload: DesafioCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(nuevo_desafio)
 
+    # ✅ Buscar tokens de los 4 jugadores (multi-device)
+    jugador_ids = list({
+        retadora.jugador1_id,
+        retadora.jugador2_id,
+        retada.jugador1_id,
+        retada.jugador2_id,
+    })
+
+    tokens_rows = db.query(PushToken).filter(PushToken.jugador_id.in_(jugador_ids)).all()
+    token_list = [t.fcm_token for t in tokens_rows if t.fcm_token and len(t.fcm_token) > 20]
+
+    if token_list:
+        title = "🆕 Nuevo desafío"
+        body = f"⏱ {payload.fecha.strftime('%d/%m')} {str(payload.hora)[:5]}\n🎾 {titulo_desafio}\n👉 Toca para ver el detalle"
+        _send_push_desafio_creado(background_tasks, token_list, nuevo_desafio, title, body)
+
     return nuevo_desafio
 
 
-# -------------------------------------------------------------------
-# ACEPTAR DESAFÍO
-# -------------------------------------------------------------------
-@router.post(
-    "/{desafio_id}/aceptar",
-    response_model=DesafioResponse,
-    summary="Aceptar Desafío",
-)
+@router.post("/{desafio_id}/aceptar", response_model=DesafioResponse)
 def aceptar_desafio(desafio_id: int, db: Session = Depends(get_db)):
-    """
-    Marca un desafío como 'Aceptado'.
-    """
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
-
     if not desafio:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Desafío no encontrado.",
-        )
-
+        raise HTTPException(status_code=404, detail="Desafío no encontrado.")
     if desafio.estado == "Jugado":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No se puede aceptar un desafío que ya fue jugado.",
-        )
+        raise HTTPException(status_code=400, detail="No se puede aceptar un desafío que ya fue jugado.")
 
     desafio.estado = "Aceptado"
     db.commit()
@@ -245,38 +214,15 @@ def aceptar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     return desafio
 
 
-# -------------------------------------------------------------------
-# RECHAZAR DESAFÍO
-# -------------------------------------------------------------------
-@router.post(
-    "/{desafio_id}/rechazar",
-    response_model=DesafioResponse,
-    summary="Rechazar Desafío",
-)
+@router.post("/{desafio_id}/rechazar", response_model=DesafioResponse)
 def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
-    """
-    Marca un desafío como 'Rechazado'.
-    Solo se permite si está Pendiente o Aceptado.
-    """
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
-
     if not desafio:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Desafío no encontrado.",
-        )
-
+        raise HTTPException(status_code=404, detail="Desafío no encontrado.")
     if desafio.estado == "Jugado":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No se puede rechazar un desafío que ya fue jugado.",
-        )
-
+        raise HTTPException(status_code=400, detail="No se puede rechazar un desafío que ya fue jugado.")
     if desafio.estado == "Rechazado":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Este desafío ya está rechazado.",
-        )
+        raise HTTPException(status_code=400, detail="Este desafío ya está rechazado.")
 
     desafio.estado = "Rechazado"
     db.commit()
@@ -284,29 +230,20 @@ def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     return desafio
 
 
-# -------------------------------------------------------------------
-# CARGAR RESULTADO Y APLICAR SWAP DE RANKING (REGALMENTO REAL)
-# -------------------------------------------------------------------
-from sqlalchemy import and_
-
-def _gana_retador(data) -> bool:
-    # Cuenta sets ganados por retador vs desafiado
+def _gana_retador(data: ResultadoSets) -> bool:
     sets_ret = 0
     sets_des = 0
 
-    # Set 1
     if data.set1_retador > data.set1_desafiado:
         sets_ret += 1
     elif data.set1_desafiado > data.set1_retador:
         sets_des += 1
 
-    # Set 2
     if data.set2_retador > data.set2_desafiado:
         sets_ret += 1
     elif data.set2_desafiado > data.set2_retador:
         sets_des += 1
 
-    # Set 3 (si existe)
     if data.set3_retador is not None and data.set3_desafiado is not None:
         if data.set3_retador > data.set3_desafiado:
             sets_ret += 1
@@ -323,41 +260,28 @@ def cargar_resultado(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
-    # 1) Buscar el desafío
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado")
-
     if desafio.estado == "Jugado":
-        # Evita doble carga
         raise HTTPException(status_code=400, detail="Este desafío ya está Jugado")
 
-    # 2) Buscar parejas
     retadora = db.query(Pareja).filter(Pareja.id == desafio.retadora_pareja_id).first()
     retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
-
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
-    # 3) Determinar ganador por sets
     retador_gana = _gana_retador(data)
     ganador_id = retadora.id if retador_gana else retada.id
 
-    # 4) Guardar resultado mínimo en desafio
     desafio.estado = "Jugado"
     desafio.ganador_pareja_id = ganador_id
 
-    # 5) Aplicar ranking (swap) SOLO si gana la retadora
-    # Regla: el retador ocupa el puesto del desafiado (swap)
     desafio.pos_retadora_old = retadora.posicion_actual
     desafio.pos_retada_old = retada.posicion_actual
 
     if retador_gana:
-        # swap posiciones
-        retadora.posicion_actual, retada.posicion_actual = (
-            retada.posicion_actual,
-            retadora.posicion_actual,
-        )
+        retadora.posicion_actual, retada.posicion_actual = (retada.posicion_actual, retadora.posicion_actual)
         desafio.swap_aplicado = True
     else:
         desafio.swap_aplicado = False
@@ -366,50 +290,23 @@ def cargar_resultado(
 
     db.commit()
     db.refresh(desafio)
-
     return desafio
 
-# -------------------------------------------------------------------
-# LISTAR DESAFÍOS DE UNA PAREJA (HISTORIAL)
-# -------------------------------------------------------------------
-@router.get(
-    "/pareja/{pareja_id}",
-    response_model=List[DesafioHistorialItem],
-    summary="Listar desafíos de una pareja (historial)",
-)
+
+@router.get("/pareja/{pareja_id}", response_model=List[DesafioHistorialItem])
 def listar_desafios_pareja(pareja_id: int, db: Session = Depends(get_db)):
-    """
-    Lista todos los desafíos donde participó una pareja,
-    ya sea como retadora o como retada.
-    """
     desafios = (
         db.query(Desafio)
-        .filter(
-            or_(
-                Desafio.retadora_pareja_id == pareja_id,
-                Desafio.retada_pareja_id == pareja_id,
-            )
-        )
+        .filter(or_(Desafio.retadora_pareja_id == pareja_id, Desafio.retada_pareja_id == pareja_id))
         .order_by(Desafio.fecha.desc(), Desafio.hora.desc())
         .all()
     )
-
     return desafios
 
 
-# -------------------------------------------------------------------
-# OBTENER UN DESAFÍO POR ID
-# -------------------------------------------------------------------
-@router.get(
-    "/{desafio_id}",
-    response_model=DesafioResponse,
-    summary="Obtener Desafío por ID",
-)
+@router.get("/{desafio_id}", response_model=DesafioResponse)
 def obtener_desafio(desafio_id: int, db: Session = Depends(get_db)):
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Desafío no encontrado.",
-        )
+        raise HTTPException(status_code=404, detail="Desafío no encontrado.")
     return desafio
