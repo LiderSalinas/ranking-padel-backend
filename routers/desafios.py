@@ -1,6 +1,6 @@
 # routers/desafios.py
 from datetime import date, timedelta
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import or_
@@ -49,6 +49,32 @@ def _add_background_push(
             print("❌ Error enviando push (background):", str(e))
 
     background_tasks.add_task(_job)
+
+
+def _latest_tokens_by_player(db: Session, jugador_ids: Set[int]) -> List[str]:
+    """
+    ✅ 1 token por jugador (el más reciente).
+    Esto evita DUPLICADAS cuando el mismo jugador tiene token de PC + Android.
+    """
+    if not jugador_ids:
+        return []
+
+    rows = (
+        db.query(PushToken)
+        .filter(PushToken.jugador_id.in_(list(jugador_ids)))
+        .order_by(PushToken.jugador_id.asc(), PushToken.created_at.desc())
+        .all()
+    )
+
+    picked: Dict[int, str] = {}
+    for r in rows:
+        if not r.fcm_token or len(r.fcm_token) < 20:
+            continue
+        # como viene ordenado por created_at DESC, el primero por jugador_id es el más nuevo
+        if r.jugador_id not in picked:
+            picked[r.jugador_id] = r.fcm_token
+
+    return list(picked.values())
 
 
 @router.get("/mis-proximos", response_model=List[DesafioResponse])
@@ -178,39 +204,26 @@ def crear_desafio(
     db.commit()
     db.refresh(nuevo_desafio)
 
-    # ✅ A QUIÉN NOTIFICAMOS (PRO):
+    # ✅ A QUIÉN NOTIFICAMOS:
     # - retada (ambos)
-    # - retador (compañero)
-    # - normalmente excluimos al que creó para no duplicar
-    all_players: Set[int] = {
+    # - retadora (ambos)
+    # - creador también (vos querés que te llegue a tu celu aunque seas el que crea)
+    recipients: Set[int] = {
         retada.jugador1_id,
         retada.jugador2_id,
         retadora.jugador1_id,
         retadora.jugador2_id,
+        jugador_actual.id,
     }
 
-    recipients: Set[int] = set(all_players)
-    recipients.discard(jugador_actual.id)
-
-    def _load_tokens_for(jugador_ids: Set[int]) -> List[str]:
-        rows = db.query(PushToken).filter(PushToken.jugador_id.in_(list(jugador_ids))).all()
-        return [t.fcm_token for t in rows if t.fcm_token and len(t.fcm_token) > 20]
-
-    token_list = _load_tokens_for(recipients)
-
-    # ✅ FIX CLAVE (SINGLE DEVICE / TEST):
-    # si no hay tokens de otros, mandamos al creador para que puedas probar con 1 teléfono
-    if not token_list:
-        creator_tokens = _load_tokens_for({jugador_actual.id})
-        if creator_tokens:
-            print("ℹ️ Push fallback: no había tokens de otros. Enviando al creador para testing.")
-            token_list = creator_tokens
+    # ✅ 1 token por jugador (el más reciente) => evita duplicadas PC+Android
+    token_list = _latest_tokens_by_player(db, recipients)
 
     print(
         "ℹ️ Push debug:",
         {
             "jugador_actual": jugador_actual.id,
-            "recipients": list(recipients),
+            "recipients": sorted(list(recipients)),
             "token_count": len(token_list),
         },
     )
