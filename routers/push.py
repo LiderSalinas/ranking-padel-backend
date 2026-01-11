@@ -11,6 +11,20 @@ from core.firebase_admin import send_push_to_tokens
 router = APIRouter(prefix="/push", tags=["Push"])
 
 
+def _valid_tokens(rows):
+    # filtra + dedupe (1 noti por token real)
+    tokens = [t.fcm_token for t in rows if t.fcm_token and len(t.fcm_token) > 20]
+    # dedupe manteniendo orden
+    seen = set()
+    out = []
+    for tok in tokens:
+        if tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out
+
+
 @router.post("/token")
 def save_push_token(
     payload: PushTokenUpsert,
@@ -19,17 +33,21 @@ def save_push_token(
 ):
     token = (payload.fcm_token or "").strip()
 
-    
     if not token or len(token) < 20:
         raise HTTPException(status_code=400, detail="FCM token inválido")
 
-   
-    db.query(PushToken).filter(PushToken.jugador_id == jugador.id).delete()
+    # ✅ MULTI-DEVICE: no pisar, solo insertar si es nuevo
+    existing = (
+        db.query(PushToken)
+        .filter(PushToken.jugador_id == jugador.id, PushToken.fcm_token == token)
+        .first()
+    )
+    if existing:
+        return {"ok": True, "jugador_id": jugador.id, "saved": "already_exists"}
 
     db.add(PushToken(jugador_id=jugador.id, fcm_token=token))
     db.commit()
-
-    return {"ok": True, "jugador_id": jugador.id, "saved": "replaced"}
+    return {"ok": True, "jugador_id": jugador.id, "saved": "inserted"}
 
 
 @router.post("/send-to-me")
@@ -38,11 +56,11 @@ def send_to_me(
     db: Session = Depends(get_db),
     jugador=Depends(get_current_jugador),
 ):
-    tokens = db.query(PushToken).filter(PushToken.jugador_id == jugador.id).all()
-    if not tokens:
+    rows = db.query(PushToken).filter(PushToken.jugador_id == jugador.id).all()
+    if not rows:
         raise HTTPException(status_code=404, detail="Este jugador no tiene token registrado")
 
-    token_list = [t.fcm_token for t in tokens if t.fcm_token and len(t.fcm_token) > 20]
+    token_list = _valid_tokens(rows)
     if not token_list:
         raise HTTPException(status_code=400, detail="Este jugador no tiene FCM tokens válidos guardados")
 
@@ -61,11 +79,11 @@ def send_to_jugador(
     db: Session = Depends(get_db),
     jugador=Depends(get_current_jugador),
 ):
-    tokens = db.query(PushToken).filter(PushToken.jugador_id == payload.jugador_id).all()
-    if not tokens:
+    rows = db.query(PushToken).filter(PushToken.jugador_id == payload.jugador_id).all()
+    if not rows:
         raise HTTPException(status_code=404, detail="Ese jugador no tiene token registrado")
 
-    token_list = [t.fcm_token for t in tokens if t.fcm_token and len(t.fcm_token) > 20]
+    token_list = _valid_tokens(rows)
     if not token_list:
         raise HTTPException(status_code=400, detail="Ese jugador no tiene FCM tokens válidos guardados")
 
