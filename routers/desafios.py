@@ -178,24 +178,42 @@ def crear_desafio(
     db.commit()
     db.refresh(nuevo_desafio)
 
-    # ✅ A QUIÉN NOTIFICAMOS:
+    # ✅ A QUIÉN NOTIFICAMOS (PRO):
     # - retada (ambos)
-    # - compañero del retador (para que se entere)
-    # - excluimos al que creó (jugador_actual) para no duplicar
-    recipients: Set[int] = {
+    # - retador (compañero)
+    # - normalmente excluimos al que creó para no duplicar
+    all_players: Set[int] = {
         retada.jugador1_id,
         retada.jugador2_id,
         retadora.jugador1_id,
         retadora.jugador2_id,
     }
+
+    recipients: Set[int] = set(all_players)
     recipients.discard(jugador_actual.id)
 
-    tokens_rows = (
-        db.query(PushToken)
-        .filter(PushToken.jugador_id.in_(list(recipients)))
-        .all()
+    def _load_tokens_for(jugador_ids: Set[int]) -> List[str]:
+        rows = db.query(PushToken).filter(PushToken.jugador_id.in_(list(jugador_ids))).all()
+        return [t.fcm_token for t in rows if t.fcm_token and len(t.fcm_token) > 20]
+
+    token_list = _load_tokens_for(recipients)
+
+    # ✅ FIX CLAVE (SINGLE DEVICE / TEST):
+    # si no hay tokens de otros, mandamos al creador para que puedas probar con 1 teléfono
+    if not token_list:
+        creator_tokens = _load_tokens_for({jugador_actual.id})
+        if creator_tokens:
+            print("ℹ️ Push fallback: no había tokens de otros. Enviando al creador para testing.")
+            token_list = creator_tokens
+
+    print(
+        "ℹ️ Push debug:",
+        {
+            "jugador_actual": jugador_actual.id,
+            "recipients": list(recipients),
+            "token_count": len(token_list),
+        },
     )
-    token_list = [t.fcm_token for t in tokens_rows if t.fcm_token and len(t.fcm_token) > 20]
 
     if token_list:
         title = "🆕 Nuevo desafío"
