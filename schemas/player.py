@@ -10,7 +10,8 @@ class JugadorBase(BaseModel):
     apellido: str
     telefono: str
     email: str
-    foto_url: Optional[str] = None 
+    foto_url: Optional[str] = None
+
 
 class JugadorSimple(JugadorBase):
     id: int
@@ -26,6 +27,7 @@ class JugadorListaResponse(JugadorSimple):
     partidos_jugados: int
     victorias: int
     derrotas: int
+    retiros: int = 0  # ✅ nuevo
 
 
 class JugadorDesafioItem(BaseModel):
@@ -52,4 +54,5 @@ class JugadorDetalleResponse(JugadorSimple):
     partidos_jugados: int
     victorias: int
     derrotas: int
+    retiros: int = 0  # ✅ nuevo
     desafios: List[JugadorDesafioItem]

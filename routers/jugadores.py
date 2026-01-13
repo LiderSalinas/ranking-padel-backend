@@ -47,9 +47,7 @@ def listar_jugadores(
         if grupo and not parejas_jugador:
             continue
 
-        grupo_principal = (
-            parejas_jugador[0].grupo if parejas_jugador else None
-        )
+        grupo_principal = parejas_jugador[0].grupo if parejas_jugador else None
         ids_parejas = [p.id for p in parejas_jugador]
 
         if ids_parejas:
@@ -69,10 +67,21 @@ def listar_jugadores(
 
         partidos_jugados = len(desafios)
         victorias = 0
+        retiros = 0
+
         for d in desafios:
-            if d.ganador_pareja_id is not None and d.ganador_pareja_id in ids_parejas:
+            # ✅ retiro “técnico”: Jugado pero sin ganador (si te pasa con WO/Retiro sin modelar)
+            if d.ganador_pareja_id is None:
+                retiros += 1
+                continue
+
+            if d.ganador_pareja_id in ids_parejas:
                 victorias += 1
-        derrotas = partidos_jugados - victorias
+
+        # Derrotas: jugados - ganados - retiros
+        derrotas = partidos_jugados - victorias - retiros
+        if derrotas < 0:
+            derrotas = 0
 
         resultado.append(
             JugadorListaResponse(
@@ -81,10 +90,12 @@ def listar_jugadores(
                 apellido=j.apellido,
                 telefono=j.telefono,
                 email=j.email,
+                foto_url=j.foto_url,
                 grupo_principal=grupo_principal,
                 partidos_jugados=partidos_jugados,
                 victorias=victorias,
                 derrotas=derrotas,
+                retiros=retiros,  # ✅ nuevo
             )
         )
 
@@ -105,9 +116,7 @@ def obtener_detalle_jugador(
         .first()
     )
     if not jugador:
-        raise HTTPException(
-            status_code=404, detail="Jugador no encontrado."
-        )
+        raise HTTPException(status_code=404, detail="Jugador no encontrado.")
 
     parejas = (
         db.query(models.Pareja)
@@ -142,15 +151,10 @@ def obtener_detalle_jugador(
 
     partidos_jugados = len(desafios)
     victorias = 0
+    retiros = 0
     desafios_items: list[JugadorDesafioItem] = []
 
     for d in desafios:
-        if d.ganador_pareja_id is not None and d.ganador_pareja_id in ids_parejas:
-            es_ganado = True
-            victorias += 1
-        else:
-            es_ganado = False
-
         # Con qué pareja jugó y qué rol tuvo
         if d.retadora_pareja_id in ids_parejas:
             pareja_id = d.retadora_pareja_id
@@ -159,11 +163,21 @@ def obtener_detalle_jugador(
             pareja_id = d.retada_pareja_id
             rol = "retada"
 
-        grupo_desafio = None
+        # grupo del desafio (según la pareja del jugador)
+        grupo_desafio = ""
         for p in parejas:
             if p.id == pareja_id:
-                grupo_desafio = p.grupo
+                grupo_desafio = p.grupo or ""
                 break
+
+        # ✅ retiro “técnico”
+        if d.ganador_pareja_id is None:
+            retiros += 1
+            es_ganado = False
+        else:
+            es_ganado = d.ganador_pareja_id in ids_parejas
+            if es_ganado:
+                victorias += 1
 
         desafios_items.append(
             JugadorDesafioItem(
@@ -172,14 +186,16 @@ def obtener_detalle_jugador(
                 hora=d.hora,
                 estado=d.estado,
                 titulo_desafio=d.titulo_desafio,
-                grupo=grupo_desafio or "",
+                grupo=grupo_desafio,
                 pareja_id=pareja_id,
                 rol=rol,
                 es_ganado=es_ganado,
             )
         )
 
-    derrotas = partidos_jugados - victorias
+    derrotas = partidos_jugados - victorias - retiros
+    if derrotas < 0:
+        derrotas = 0
 
     return JugadorDetalleResponse(
         id=jugador.id,
@@ -187,9 +203,11 @@ def obtener_detalle_jugador(
         apellido=jugador.apellido,
         telefono=jugador.telefono,
         email=jugador.email,
+        foto_url=jugador.foto_url,
         grupo_principal=grupo_principal,
         partidos_jugados=partidos_jugados,
         victorias=victorias,
         derrotas=derrotas,
+        retiros=retiros,  # ✅ nuevo
         desafios=desafios_items,
     )

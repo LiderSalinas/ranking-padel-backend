@@ -26,18 +26,26 @@ class PosicionRanking(BaseModel):
     cuota_al_dia: bool
 
 
-def _calc_stats_for_parejas(db: Session, pareja_ids: List[int]) -> Dict[int, Dict[str, int]]:
-    """
-    Devuelve stats por pareja:
-      stats[pareja_id] = {"ganados": X, "perdidos": Y, "retiros": Z}
-    """
-    stats: Dict[int, Dict[str, int]] = {
-        pid: {"ganados": 0, "perdidos": 0, "retiros": 0} for pid in pareja_ids
-    }
+@router.get("/posiciones", response_model=List[PosicionRanking])
+def get_posiciones_ranking(db: Session = Depends(get_db)):
+    # 1) Parejas activas con posición
+    parejas = (
+        db.query(Pareja)
+        .options(
+            joinedload(Pareja.jugador1),
+            joinedload(Pareja.jugador2),
+        )
+        .filter(Pareja.activo.is_(True), Pareja.posicion_actual.isnot(None))
+        .order_by(Pareja.grupo.asc(), Pareja.posicion_actual.asc())
+        .all()
+    )
 
-    if not pareja_ids:
-        return stats
+    if not parejas:
+        return []
 
+    pareja_ids = [p.id for p in parejas]
+
+    # 2) Traemos todos los desafíos jugados donde participó cualquiera de esas parejas
     desafios = (
         db.query(Desafio)
         .filter(
@@ -50,59 +58,36 @@ def _calc_stats_for_parejas(db: Session, pareja_ids: List[int]) -> Dict[int, Dic
         .all()
     )
 
+    # 3) Armamos stats por pareja
+    played: Dict[int, int] = {pid: 0 for pid in pareja_ids}
+    wins: Dict[int, int] = {pid: 0 for pid in pareja_ids}
+    retiros: Dict[int, int] = {pid: 0 for pid in pareja_ids}  # por ahora 0 (no hay campo en BD)
+
     for d in desafios:
-        a = d.retadora_pareja_id
-        b = d.retada_pareja_id
-        w = d.ganador_pareja_id  # puede ser None si algún día metés “retiro/wo” sin ganador
+        # suma partidos a ambos participantes
+        if d.retadora_pareja_id in played:
+            played[d.retadora_pareja_id] += 1
+        if d.retada_pareja_id in played:
+            played[d.retada_pareja_id] += 1
 
-        # Solo contamos si están en nuestra lista
-        if a not in stats or b not in stats:
-            continue
+        # suma victoria al ganador si existe
+        if d.ganador_pareja_id is not None and d.ganador_pareja_id in wins:
+            wins[d.ganador_pareja_id] += 1
 
-        # ✅ Retiros: hoy no tenés campo retiro/wo en tu modelo
-        # Entonces dejamos retiros en 0, salvo el caso raro de Jugado sin ganador.
-        if w is None:
-            stats[a]["retiros"] += 1
-            stats[b]["retiros"] += 1
-            continue
+        # retiros: si más adelante agregás un campo (ej: d.resultado_tipo == "retiro"),
+        # acá se incrementa. Por ahora queda 0.
 
-        # ✅ Ganados/Perdidos
-        if w == a:
-            stats[a]["ganados"] += 1
-            stats[b]["perdidos"] += 1
-        elif w == b:
-            stats[b]["ganados"] += 1
-            stats[a]["perdidos"] += 1
-        else:
-            # ganador no coincide con ninguno (dato corrupto)
-            pass
-
-    return stats
-
-
-@router.get("/posiciones", response_model=List[PosicionRanking])
-def get_posiciones_ranking(db: Session = Depends(get_db)):
-    parejas = (
-        db.query(Pareja)
-        .options(
-            joinedload(Pareja.jugador1),
-            joinedload(Pareja.jugador2),
-        )
-        .filter(Pareja.activo.is_(True), Pareja.posicion_actual.isnot(None))
-        .order_by(Pareja.grupo.asc(), Pareja.posicion_actual.asc())
-        .all()
-    )
-
-    pareja_ids = [p.id for p in parejas]
-    stats = _calc_stats_for_parejas(db, pareja_ids)
-
+    # 4) Respuesta final
     resp: List[PosicionRanking] = []
     for p in parejas:
         j1 = p.jugador1
         j2 = p.jugador2
         nombre = f"{j1.nombre} {j1.apellido} / {j2.nombre} {j2.apellido}"
 
-        s = stats.get(p.id, {"ganados": 0, "perdidos": 0, "retiros": 0})
+        ganados = wins.get(p.id, 0)
+        partidos = played.get(p.id, 0)
+        perdidos = max(partidos - ganados, 0)
+        ret = retiros.get(p.id, 0)
 
         resp.append(
             PosicionRanking(
@@ -111,9 +96,9 @@ def get_posiciones_ranking(db: Session = Depends(get_db)):
                 nombre_pareja=nombre,
                 grupo=p.grupo,
                 posicion_actual=p.posicion_actual or 0,
-                ganados=s["ganados"],
-                perdidos=s["perdidos"],
-                retiros=s["retiros"],
+                ganados=ganados,
+                perdidos=perdidos,
+                retiros=ret,
                 cuota_al_dia=True,  # lo conectamos después
             )
         )
