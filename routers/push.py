@@ -1,4 +1,5 @@
 # routers/push.py
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -10,11 +11,13 @@ from core.firebase_admin import send_push_to_tokens
 
 router = APIRouter(prefix="/push", tags=["Push"])
 
+# ✅ cuántos dispositivos máximo por jugador (PC + Teléfono = 2)
+MAX_TOKENS_PER_JUGADOR = 2
+
 
 def _valid_tokens(rows):
     # filtra + dedupe (1 noti por token real)
     tokens = [t.fcm_token for t in rows if t.fcm_token and len(t.fcm_token) > 20]
-    # dedupe manteniendo orden
     seen = set()
     out = []
     for tok in tokens:
@@ -23,6 +26,26 @@ def _valid_tokens(rows):
         seen.add(tok)
         out.append(tok)
     return out
+
+
+def _prune_old_tokens(db: Session, jugador_id: int, keep: int = MAX_TOKENS_PER_JUGADOR):
+    """
+    ✅ Mantener solo los 'keep' tokens más recientes por jugador.
+    Evita tokens viejos/duplicados de dispositivos anteriores.
+    """
+    rows = (
+        db.query(PushToken)
+        .filter(PushToken.jugador_id == jugador_id)
+        .order_by(PushToken.created_at.desc())
+        .all()
+    )
+    if len(rows) <= keep:
+        return
+
+    to_delete = rows[keep:]
+    for r in to_delete:
+        db.delete(r)
+    db.commit()
 
 
 @router.post("/token")
@@ -36,17 +59,30 @@ def save_push_token(
     if not token or len(token) < 20:
         raise HTTPException(status_code=400, detail="FCM token inválido")
 
-    # ✅ MULTI-DEVICE: no pisar, solo insertar si es nuevo
     existing = (
         db.query(PushToken)
         .filter(PushToken.jugador_id == jugador.id, PushToken.fcm_token == token)
         .first()
     )
-    if existing:
-        return {"ok": True, "jugador_id": jugador.id, "saved": "already_exists"}
 
-    db.add(PushToken(jugador_id=jugador.id, fcm_token=token))
+    now = datetime.utcnow()
+
+    if existing:
+        # ✅ FIX CLAVE: refrescar "último dispositivo activo"
+        existing.created_at = now
+        db.commit()
+
+        # opcional: limpia tokens viejos (deja solo 2)
+        _prune_old_tokens(db, jugador.id)
+
+        return {"ok": True, "jugador_id": jugador.id, "saved": "refreshed"}
+
+    db.add(PushToken(jugador_id=jugador.id, fcm_token=token, created_at=now))
     db.commit()
+
+    # opcional: limpia tokens viejos (deja solo 2)
+    _prune_old_tokens(db, jugador.id)
+
     return {"ok": True, "jugador_id": jugador.id, "saved": "inserted"}
 
 

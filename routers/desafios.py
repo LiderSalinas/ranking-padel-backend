@@ -53,7 +53,7 @@ def _add_background_push(
 def _latest_tokens_by_player(db: Session, jugador_ids: Set[int]) -> List[str]:
     """
     ✅ 1 token por jugador (el más reciente).
-    Evita duplicadas cuando el mismo jugador tiene token de PC + Android.
+    Evita DUPLICADAS cuando el mismo jugador tiene token de PC + Android.
     """
     if not jugador_ids:
         return []
@@ -73,22 +73,6 @@ def _latest_tokens_by_player(db: Session, jugador_ids: Set[int]) -> List[str]:
             picked[r.jugador_id] = r.fcm_token
 
     return list(picked.values())
-
-
-def _score_text(data: ResultadoSets) -> str:
-    parts = [f"{data.set1_retador}-{data.set1_desafiado}", f"{data.set2_retador}-{data.set2_desafiado}"]
-    if data.set3_retador is not None and data.set3_desafiado is not None:
-        parts.append(f"{data.set3_retador}-{data.set3_desafiado}")
-    return " / ".join(parts)
-
-
-def _positions_in_play(desafio: Desafio, retadora: Pareja, retada: Pareja) -> str:
-    # usamos los old si están, si no, tomamos los actuales
-    p1 = desafio.pos_retadora_old if desafio.pos_retadora_old is not None else retadora.posicion_actual
-    p2 = desafio.pos_retada_old if desafio.pos_retada_old is not None else retada.posicion_actual
-    if p1 is None or p2 is None:
-        return "Puestos: (sin datos)"
-    return f"Puestos en juego: {p1} vs {p2}"
 
 
 @router.get("/mis-proximos", response_model=List[DesafioResponse])
@@ -221,13 +205,13 @@ def crear_desafio(
         retada.jugador2_id,
         retadora.jugador1_id,
         retadora.jugador2_id,
-        jugador_actual.id,  # ✅ incluir creador también (tu celu)
+        jugador_actual.id,
     }
 
     token_list = _latest_tokens_by_player(db, recipients)
 
     print(
-        "ℹ️ Push debug (create):",
+        "ℹ️ Push debug:",
         {
             "jugador_actual": jugador_actual.id,
             "recipients": sorted(list(recipients)),
@@ -316,11 +300,20 @@ def _gana_retador(data: ResultadoSets) -> bool:
     return sets_ret > sets_des
 
 
+def _fmt_sets(data: ResultadoSets) -> str:
+    s = []
+    s.append(f"{data.set1_retador}-{data.set1_desafiado}")
+    s.append(f"{data.set2_retador}-{data.set2_desafiado}")
+    if data.set3_retador is not None and data.set3_desafiado is not None:
+        s.append(f"{data.set3_retador}-{data.set3_desafiado}")
+    return " | ".join(s)
+
+
 @router.post("/{desafio_id}/resultado", response_model=DesafioResponse)
 def cargar_resultado(
     desafio_id: int,
     data: ResultadoSets,
-    background_tasks: BackgroundTasks,
+    background_tasks: BackgroundTasks,   # ✅ agregado para push
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
@@ -335,18 +328,19 @@ def cargar_resultado(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
-    # guardamos posiciones "en juego" ANTES del swap
+    retador_gana = _gana_retador(data)
+    ganador_id = retadora.id if retador_gana else retada.id
+
+    # guardamos las posiciones “en juego” ANTES del swap
     desafio.pos_retadora_old = retadora.posicion_actual
     desafio.pos_retada_old = retada.posicion_actual
-
-    retador_gana = _gana_retador(data)
-    ganador_pareja = retadora if retador_gana else retada
-    perdedor_pareja = retada if retador_gana else retadora
+    puesto_en_juego = None
+    if desafio.pos_retadora_old is not None and desafio.pos_retada_old is not None:
+        puesto_en_juego = min(desafio.pos_retadora_old, desafio.pos_retada_old)
 
     desafio.estado = "Jugado"
-    desafio.ganador_pareja_id = ganador_pareja.id
+    desafio.ganador_pareja_id = ganador_id
 
-    # swap si gana el retador
     if retador_gana:
         retadora.posicion_actual, retada.posicion_actual = (
             retada.posicion_actual,
@@ -361,41 +355,31 @@ def cargar_resultado(
     db.commit()
     db.refresh(desafio)
 
-    # -------------------------
-    # ✅ PUSH RESULTADO CARGADO
-    # -------------------------
+    # ---------------- PUSH RESULTADO (AppSheet-like) ----------------
+    # Notificamos a todos los que participaron + el que cargó resultado
     recipients: Set[int] = {
-        retadora.jugador1_id,
-        retadora.jugador2_id,
         retada.jugador1_id,
         retada.jugador2_id,
-        jugador_actual.id,  # ✅ también al que cargó el resultado
+        retadora.jugador1_id,
+        retadora.jugador2_id,
+        jugador_actual.id,
     }
-
     token_list = _latest_tokens_by_player(db, recipients)
 
-    print(
-        "ℹ️ Push debug (resultado):",
-        {
-            "jugador_actual": jugador_actual.id,
-            "recipients": sorted(list(recipients)),
-            "token_count": len(token_list),
-        },
-    )
-
     if token_list:
-        label_ganador = _pareja_label(db, ganador_pareja)
-        label_perdedor = _pareja_label(db, perdedor_pareja)
-        score = _score_text(data)
-        puestos = _positions_in_play(desafio, retadora, retada)
+        label_retadora = _pareja_label(db, retadora)
+        label_retada = _pareja_label(db, retada)
+        titulo = f"{label_retadora} vs {label_retada}"
 
-        title = "🏆 Resultado cargado"
+        ganador_label = label_retadora if ganador_id == retadora.id else label_retada
+        sets_txt = _fmt_sets(data)
+
+        title = "🏁 Resultado cargado"
         body = (
-            f"✅ Ganó: {label_ganador}\n"
-            f"🆚 {label_perdedor}\n"
-            f"📌 Sets: {score}\n"
-            f"🎯 {puestos}\n"
-            f"👉 Toca para ver el detalle"
+            f"🏆 Ganó: {ganador_label}\n"
+            f"🎾 Sets: {sets_txt}\n"
+            + (f"🏅 Puesto en juego: N.º {puesto_en_juego}\n" if puesto_en_juego else "")
+            + "👉 Toca para ver el detalle"
         )
 
         _add_background_push(
@@ -405,21 +389,21 @@ def cargar_resultado(
             body=body,
             data={
                 "type": "desafio",
-                "event": "resultado",
+                "event": "result",
                 "desafio_id": str(desafio.id),
-                "ganador_pareja_id": str(ganador_pareja.id),
-                "retadora_pareja_id": str(retadora.id),
-                "retada_pareja_id": str(retada.id),
-                "swap_aplicado": str(desafio.swap_aplicado),
-                "pos_retadora_old": str(desafio.pos_retadora_old) if desafio.pos_retadora_old is not None else "",
-                "pos_retada_old": str(desafio.pos_retada_old) if desafio.pos_retada_old is not None else "",
-                "set1_retador": str(data.set1_retador),
-                "set1_desafiado": str(data.set1_desafiado),
-                "set2_retador": str(data.set2_retador),
-                "set2_desafiado": str(data.set2_desafiado),
-                "set3_retador": "" if data.set3_retador is None else str(data.set3_retador),
-                "set3_desafiado": "" if data.set3_desafiado is None else str(data.set3_desafiado),
-                "score": score,
+                "ganador_pareja_id": str(desafio.ganador_pareja_id or ""),
+                "swap_aplicado": str(bool(desafio.swap_aplicado)),
+                "pos_retadora_old": str(desafio.pos_retadora_old or ""),
+                "pos_retada_old": str(desafio.pos_retada_old or ""),
+                "puesto_en_juego": str(puesto_en_juego or ""),
+                "set1": f"{data.set1_retador}-{data.set1_desafiado}",
+                "set2": f"{data.set2_retador}-{data.set2_desafiado}",
+                "set3": (
+                    f"{data.set3_retador}-{data.set3_desafiado}"
+                    if data.set3_retador is not None and data.set3_desafiado is not None
+                    else ""
+                ),
+                "titulo": titulo,
             },
         )
 
