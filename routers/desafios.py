@@ -277,24 +277,42 @@ def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     return desafio
 
 
+# ✅ FIX: ganador correcto + set3 obligatorio si van 1-1
 def _gana_retador(data: ResultadoSets) -> bool:
     sets_ret = 0
     sets_des = 0
 
+    # No permitas empates por set
+    if data.set1_retador == data.set1_desafiado:
+        raise HTTPException(status_code=400, detail="Set 1 no puede quedar empatado.")
+    if data.set2_retador == data.set2_desafiado:
+        raise HTTPException(status_code=400, detail="Set 2 no puede quedar empatado.")
+
+    # Set 1
     if data.set1_retador > data.set1_desafiado:
         sets_ret += 1
-    elif data.set1_desafiado > data.set1_retador:
+    else:
         sets_des += 1
 
+    # Set 2
     if data.set2_retador > data.set2_desafiado:
         sets_ret += 1
-    elif data.set2_desafiado > data.set2_retador:
+    else:
         sets_des += 1
 
-    if data.set3_retador is not None and data.set3_desafiado is not None:
+    # Si van 1-1, set3 es obligatorio
+    if sets_ret == sets_des:
+        if data.set3_retador is None or data.set3_desafiado is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Falta cargar el Set 3 (Super Tie-Break) porque van 1-1.",
+            )
+        if data.set3_retador == data.set3_desafiado:
+            raise HTTPException(status_code=400, detail="Set 3 no puede quedar empatado.")
+
         if data.set3_retador > data.set3_desafiado:
             sets_ret += 1
-        elif data.set3_desafiado > data.set3_retador:
+        else:
             sets_des += 1
 
     return sets_ret > sets_des
@@ -328,6 +346,17 @@ def cargar_resultado(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
+    # ✅ FIX: no se permite aplicar ranking entre grupos distintos
+    if retadora.grupo != retada.grupo:
+        raise HTTPException(status_code=400, detail="No se puede aplicar ranking entre grupos distintos.")
+
+    # ✅ FIX: solo pueden cargar resultado quienes participan
+    if jugador_actual.id not in (
+        retadora.jugador1_id, retadora.jugador2_id,
+        retada.jugador1_id, retada.jugador2_id
+    ):
+        raise HTTPException(status_code=403, detail="No pertenecés a este desafío.")
+
     retador_gana = _gana_retador(data)
     ganador_id = retadora.id if retador_gana else retada.id
 
@@ -341,7 +370,8 @@ def cargar_resultado(
     desafio.estado = "Jugado"
     desafio.ganador_pareja_id = ganador_id
 
-    if retador_gana:
+    # ✅ FIX: idempotencia (si por algún motivo reintentan, no swapear 2 veces)
+    if retador_gana and not desafio.swap_aplicado:
         retadora.posicion_actual, retada.posicion_actual = (
             retada.posicion_actual,
             retadora.posicion_actual,
