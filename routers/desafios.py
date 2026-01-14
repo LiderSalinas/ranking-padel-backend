@@ -356,7 +356,6 @@ def cargar_resultado(
     db.refresh(desafio)
 
     # ---------------- PUSH RESULTADO (AppSheet-like) ----------------
-    # Notificamos a todos los que participaron + el que cargó resultado
     recipients: Set[int] = {
         retada.jugador1_id,
         retada.jugador2_id,
@@ -426,9 +425,34 @@ def listar_desafios_pareja(pareja_id: int, db: Session = Depends(get_db)):
     return desafios
 
 
+# ✅ CORRECCIÓN: obtener desafío por ID con auth + check de pertenencia
 @router.get("/{desafio_id}", response_model=DesafioResponse)
-def obtener_desafio(desafio_id: int, db: Session = Depends(get_db)):
+def obtener_desafio(
+    desafio_id: int,
+    db: Session = Depends(get_db),
+    jugador_actual: Jugador = Depends(get_current_jugador),
+):
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
+
+    # validar que el jugador participa (en alguna de las parejas)
+    parejas_del_jugador = (
+        db.query(Pareja.id)
+        .filter(
+            or_(
+                Pareja.jugador1_id == jugador_actual.id,
+                Pareja.jugador2_id == jugador_actual.id,
+            )
+        )
+        .all()
+    )
+    mis_parejas_ids = {pid for (pid,) in parejas_del_jugador}
+
+    if (
+        desafio.retadora_pareja_id not in mis_parejas_ids
+        and desafio.retada_pareja_id not in mis_parejas_ids
+    ):
+        raise HTTPException(status_code=403, detail="No tenés acceso a este desafío.")
+
     return desafio
