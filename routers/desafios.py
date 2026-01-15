@@ -1,6 +1,7 @@
 # routers/desafios.py
 from datetime import date, timedelta
 from typing import List, Optional, Set, Dict
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import or_
@@ -52,8 +53,10 @@ def _add_background_push(
 
 def _latest_tokens_by_player(db: Session, jugador_ids: Set[int]) -> List[str]:
     """
-    ✅ 1 token por jugador (el más reciente).
-    Evita DUPLICADAS cuando el mismo jugador tiene token de PC + Android.
+    ✅ MULTI-DEVICE FIX:
+    - Antes: 1 token por jugador (solo el más reciente) => PC O teléfono.
+    - Ahora: devuelve TODOS los tokens válidos (deduplicados) => PC Y teléfono.
+    - También limita cantidad por jugador para evitar spam por tokens viejos duplicados.
     """
     if not jugador_ids:
         return []
@@ -65,14 +68,32 @@ def _latest_tokens_by_player(db: Session, jugador_ids: Set[int]) -> List[str]:
         .all()
     )
 
-    picked: Dict[int, str] = {}
-    for r in rows:
-        if not r.fcm_token or len(r.fcm_token) < 20:
-            continue
-        if r.jugador_id not in picked:
-            picked[r.jugador_id] = r.fcm_token
+    MAX_TOKENS_POR_JUGADOR = 5  # podés bajar a 2 si querés súper estricto
+    per_player_count: Dict[int, int] = defaultdict(int)
 
-    return list(picked.values())
+    tokens: List[str] = []
+    seen: Set[str] = set()
+
+    for r in rows:
+        tok = (r.fcm_token or "").strip()
+
+        # filtro mínimo para tokens basura
+        if len(tok) < 20:
+            continue
+
+        # límite por jugador (anti-spam)
+        if per_player_count[r.jugador_id] >= MAX_TOKENS_POR_JUGADOR:
+            continue
+
+        # dedupe global (mismo token repetido en varias filas)
+        if tok in seen:
+            continue
+
+        seen.add(tok)
+        tokens.append(tok)
+        per_player_count[r.jugador_id] += 1
+
+    return tokens
 
 
 @router.get("/mis-proximos", response_model=List[DesafioResponse])
