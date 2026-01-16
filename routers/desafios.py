@@ -1,7 +1,6 @@
 # routers/desafios.py
 from datetime import date, timedelta
 from typing import List, Optional, Set, Dict
-from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import or_
@@ -35,6 +34,75 @@ def _pareja_label(db: Session, pareja: Pareja) -> str:
     return f"{n1} / {n2}"
 
 
+def _tokens_by_players(db: Session, jugador_ids: Set[int]) -> List[str]:
+    """
+    ✅ Devuelve TODOS los tokens por jugador (sin límite), dedupeados.
+    PC + Teléfono + lo que sea.
+    """
+    if not jugador_ids:
+        return []
+
+    rows = (
+        db.query(PushToken)
+        .filter(PushToken.jugador_id.in_(list(jugador_ids)))
+        .order_by(PushToken.created_at.desc())
+        .all()
+    )
+
+    seen = set()
+    out = []
+    for r in rows:
+        tok = (r.fcm_token or "").strip()
+        if not tok or len(tok) < 20:
+            continue
+        if tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+
+    return out
+
+
+def _delete_invalid_tokens(invalid_tokens: List[str]) -> None:
+    """
+    ✅ Limpieza automática de tokens muertos.
+    IMPORTANTE: esto intenta abrir una sesión nueva (para background tasks).
+    Si tu database.py no expone SessionLocal, simplemente se salta sin romper nada.
+    """
+    if not invalid_tokens:
+        return
+
+    try:
+        # database.py normalmente tiene SessionLocal
+        from database import SessionLocal  # type: ignore
+    except Exception:
+        print("ℹ️ No pude importar SessionLocal para limpiar tokens inválidos. (Se omite cleanup)")
+        return
+
+    db2 = None
+    try:
+        db2 = SessionLocal()
+        (db2.query(PushToken)
+            .filter(PushToken.fcm_token.in_([t.strip() for t in invalid_tokens if t and t.strip()]))
+            .delete(synchronize_session=False)
+        )
+        db2.commit()
+        print(f"🧹 Tokens inválidos eliminados: {len(invalid_tokens)}")
+    except Exception as e:
+        print("❌ Error limpiando tokens inválidos:", str(e))
+        try:
+            if db2:
+                db2.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            if db2:
+                db2.close()
+        except Exception:
+            pass
+
+
 def _add_background_push(
     background_tasks: BackgroundTasks,
     tokens: List[str],
@@ -44,56 +112,17 @@ def _add_background_push(
 ) -> None:
     def _job():
         try:
-            send_push_to_tokens(tokens, title=title, body=body, data=data)
+            result = send_push_to_tokens(tokens, title=title, body=body, data=data)
+
+            # ✅ Limpieza de tokens muertos (si firebase_admin.py devuelve invalid_tokens)
+            invalids = (result or {}).get("invalid_tokens") or []
+            if invalids:
+                _delete_invalid_tokens(invalids)
+
         except Exception as e:
             print("❌ Error enviando push (background):", str(e))
 
     background_tasks.add_task(_job)
-
-
-def _latest_tokens_by_player(db: Session, jugador_ids: Set[int]) -> List[str]:
-    """
-    ✅ MULTI-DEVICE FIX:
-    - Antes: 1 token por jugador (solo el más reciente) => PC O teléfono.
-    - Ahora: devuelve TODOS los tokens válidos (deduplicados) => PC Y teléfono.
-    - También limita cantidad por jugador para evitar spam por tokens viejos duplicados.
-    """
-    if not jugador_ids:
-        return []
-
-    rows = (
-        db.query(PushToken)
-        .filter(PushToken.jugador_id.in_(list(jugador_ids)))
-        .order_by(PushToken.jugador_id.asc(), PushToken.created_at.desc())
-        .all()
-    )
-
-    MAX_TOKENS_POR_JUGADOR = 5  # podés bajar a 2 si querés súper estricto
-    per_player_count: Dict[int, int] = defaultdict(int)
-
-    tokens: List[str] = []
-    seen: Set[str] = set()
-
-    for r in rows:
-        tok = (r.fcm_token or "").strip()
-
-        # filtro mínimo para tokens basura
-        if len(tok) < 20:
-            continue
-
-        # límite por jugador (anti-spam)
-        if per_player_count[r.jugador_id] >= MAX_TOKENS_POR_JUGADOR:
-            continue
-
-        # dedupe global (mismo token repetido en varias filas)
-        if tok in seen:
-            continue
-
-        seen.add(tok)
-        tokens.append(tok)
-        per_player_count[r.jugador_id] += 1
-
-    return tokens
 
 
 @router.get("/mis-proximos", response_model=List[DesafioResponse])
@@ -229,7 +258,8 @@ def crear_desafio(
         jugador_actual.id,
     }
 
-    token_list = _latest_tokens_by_player(db, recipients)
+    # ✅ AHORA: TODOS los tokens (no 1 por jugador)
+    token_list = _tokens_by_players(db, recipients)
 
     print(
         "ℹ️ Push debug:",
@@ -303,25 +333,21 @@ def _gana_retador(data: ResultadoSets) -> bool:
     sets_ret = 0
     sets_des = 0
 
-    # No permitas empates por set
     if data.set1_retador == data.set1_desafiado:
         raise HTTPException(status_code=400, detail="Set 1 no puede quedar empatado.")
     if data.set2_retador == data.set2_desafiado:
         raise HTTPException(status_code=400, detail="Set 2 no puede quedar empatado.")
 
-    # Set 1
     if data.set1_retador > data.set1_desafiado:
         sets_ret += 1
     else:
         sets_des += 1
 
-    # Set 2
     if data.set2_retador > data.set2_desafiado:
         sets_ret += 1
     else:
         sets_des += 1
 
-    # Si van 1-1, set3 es obligatorio
     if sets_ret == sets_des:
         if data.set3_retador is None or data.set3_desafiado is None:
             raise HTTPException(
@@ -352,7 +378,7 @@ def _fmt_sets(data: ResultadoSets) -> str:
 def cargar_resultado(
     desafio_id: int,
     data: ResultadoSets,
-    background_tasks: BackgroundTasks,   # ✅ agregado para push
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
@@ -367,11 +393,9 @@ def cargar_resultado(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
-    # ✅ FIX: no se permite aplicar ranking entre grupos distintos
     if retadora.grupo != retada.grupo:
         raise HTTPException(status_code=400, detail="No se puede aplicar ranking entre grupos distintos.")
 
-    # ✅ FIX: solo pueden cargar resultado quienes participan
     if jugador_actual.id not in (
         retadora.jugador1_id, retadora.jugador2_id,
         retada.jugador1_id, retada.jugador2_id
@@ -381,7 +405,6 @@ def cargar_resultado(
     retador_gana = _gana_retador(data)
     ganador_id = retadora.id if retador_gana else retada.id
 
-    # guardamos las posiciones “en juego” ANTES del swap
     desafio.pos_retadora_old = retadora.posicion_actual
     desafio.pos_retada_old = retada.posicion_actual
     puesto_en_juego = None
@@ -391,7 +414,6 @@ def cargar_resultado(
     desafio.estado = "Jugado"
     desafio.ganador_pareja_id = ganador_id
 
-    # ✅ FIX: idempotencia (si por algún motivo reintentan, no swapear 2 veces)
     if retador_gana and not desafio.swap_aplicado:
         retadora.posicion_actual, retada.posicion_actual = (
             retada.posicion_actual,
@@ -406,7 +428,6 @@ def cargar_resultado(
     db.commit()
     db.refresh(desafio)
 
-    # ---------------- PUSH RESULTADO (AppSheet-like) ----------------
     recipients: Set[int] = {
         retada.jugador1_id,
         retada.jugador2_id,
@@ -414,7 +435,9 @@ def cargar_resultado(
         retadora.jugador2_id,
         jugador_actual.id,
     }
-    token_list = _latest_tokens_by_player(db, recipients)
+
+    # ✅ AHORA: TODOS los tokens (no 1 por jugador)
+    token_list = _tokens_by_players(db, recipients)
 
     if token_list:
         label_retadora = _pareja_label(db, retadora)
@@ -476,7 +499,6 @@ def listar_desafios_pareja(pareja_id: int, db: Session = Depends(get_db)):
     return desafios
 
 
-# ✅ CORRECCIÓN: obtener desafío por ID con auth + check de pertenencia
 @router.get("/{desafio_id}", response_model=DesafioResponse)
 def obtener_desafio(
     desafio_id: int,
@@ -487,7 +509,6 @@ def obtener_desafio(
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
 
-    # validar que el jugador participa (en alguna de las parejas)
     parejas_del_jugador = (
         db.query(Pareja.id)
         .filter(
