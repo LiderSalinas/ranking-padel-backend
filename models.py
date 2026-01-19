@@ -133,6 +133,17 @@ class Desafio(Base):
 
     titulo_desafio = Column(String(255), nullable=False)
 
+    # ✅ NUEVO: sets del resultado (persistencia real)
+    set1_retador = Column(Integer, nullable=True)
+    set1_desafiado = Column(Integer, nullable=True)
+    set2_retador = Column(Integer, nullable=True)
+    set2_desafiado = Column(Integer, nullable=True)
+    set3_retador = Column(Integer, nullable=True)
+    set3_desafiado = Column(Integer, nullable=True)
+
+    # ✅ NUEVO: fecha real jugado/carga de resultado
+    fecha_jugado = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -37,9 +37,17 @@ class DesafioResponse(DesafioBase):
     updated_at: datetime
     ganador_pareja_id: Optional[int] = None
 
+    # ✅ NUEVO: sets + fecha jugado (opcionales para no romper nada)
+    set1_retador: Optional[int] = None
+    set1_desafiado: Optional[int] = None
+    set2_retador: Optional[int] = None
+    set2_desafiado: Optional[int] = None
+    set3_retador: Optional[int] = None
+    set3_desafiado: Optional[int] = None
+    fecha_jugado: Optional[datetime] = None
+
     # Para que pueda leer desde el modelo SQLAlchemy (Pydantic v2)
     model_config = ConfigDict(from_attributes=True)
-     
 
 
 class DesafioResultadoPayload(BaseModel):

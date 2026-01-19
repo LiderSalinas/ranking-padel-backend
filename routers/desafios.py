@@ -1,5 +1,5 @@
 # routers/desafios.py
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from typing import List, Optional, Set, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
@@ -258,7 +258,6 @@ def crear_desafio(
         jugador_actual.id,
     }
 
-    # ✅ AHORA: TODOS los tokens (no 1 por jugador)
     token_list = _tokens_by_players(db, recipients)
 
     print(
@@ -411,6 +410,17 @@ def cargar_resultado(
     if desafio.pos_retadora_old is not None and desafio.pos_retada_old is not None:
         puesto_en_juego = min(desafio.pos_retadora_old, desafio.pos_retada_old)
 
+    # ✅ NUEVO: guardar sets en BD
+    desafio.set1_retador = data.set1_retador
+    desafio.set1_desafiado = data.set1_desafiado
+    desafio.set2_retador = data.set2_retador
+    desafio.set2_desafiado = data.set2_desafiado
+    desafio.set3_retador = data.set3_retador
+    desafio.set3_desafiado = data.set3_desafiado
+
+    # ✅ NUEVO: fecha real jugado/carga
+    desafio.fecha_jugado = datetime.utcnow()
+
     desafio.estado = "Jugado"
     desafio.ganador_pareja_id = ganador_id
 
@@ -436,7 +446,6 @@ def cargar_resultado(
         jugador_actual.id,
     }
 
-    # ✅ AHORA: TODOS los tokens (no 1 por jugador)
     token_list = _tokens_by_players(db, recipients)
 
     if token_list:
