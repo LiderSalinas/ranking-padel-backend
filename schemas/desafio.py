@@ -37,49 +37,37 @@ class DesafioResponse(DesafioBase):
     updated_at: datetime
     ganador_pareja_id: Optional[int] = None
 
-    # ✅ NUEVO: sets + fecha jugado (opcionales para no romper nada)
+    # ✅ NUEVO: sets + fecha jugado (para detalle ideal)
     set1_retador: Optional[int] = None
     set1_desafiado: Optional[int] = None
     set2_retador: Optional[int] = None
     set2_desafiado: Optional[int] = None
     set3_retador: Optional[int] = None
     set3_desafiado: Optional[int] = None
-    fecha_jugado: Optional[datetime] = None
+    fecha_jugado: Optional[date] = None
 
-    # Para que pueda leer desde el modelo SQLAlchemy (Pydantic v2)
     model_config = ConfigDict(from_attributes=True)
 
 
 class DesafioResultadoPayload(BaseModel):
     """
-    Payload para cargar el resultado de un desafío.
-    Lo usamos en:
-      POST /desafios/{desafio_id}/resultado
+    (Si lo usás en otro endpoint, lo dejamos intacto)
     """
     estado: str = "Jugado"
     ganador_pareja_id: int
 
 
 class DesafioHistorialItem(BaseModel):
-    """
-    Item para el historial de desafíos de una pareja.
-
-    Lo usamos en:
-      GET /desafios/pareja/{pareja_id}
-    y también puede ser útil en otros endpoints de historial.
-    Dejamos varios campos como opcionales para no romper nada.
-    """
     id: int
     fecha: date
     hora: time
     estado: str
     titulo_desafio: str
 
-    # Datos adicionales (opcionales)
     grupo: Optional[str] = None
     retadora_pareja_id: Optional[int] = None
     retada_pareja_id: Optional[int] = None
     ganador_pareja_id: Optional[int] = None
     pareja_id: Optional[int] = None
-    rol: Optional[str] = None   # "retadora" / "retada"
+    rol: Optional[str] = None
     es_ganado: Optional[bool] = None

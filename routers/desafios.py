@@ -1,6 +1,6 @@
 # routers/desafios.py
 from datetime import date, timedelta, datetime
-from typing import List, Optional, Set, Dict
+from typing import List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import or_
@@ -18,6 +18,9 @@ router = APIRouter(tags=["Desafios"])
 
 
 class ResultadoSets(BaseModel):
+    # ✅ NUEVO: fecha jugado real (DATE) - viene del frontend como "YYYY-MM-DD"
+    fecha_jugado: Optional[date] = None
+
     set1_retador: int
     set1_desafiado: int
     set2_retador: int
@@ -37,7 +40,6 @@ def _pareja_label(db: Session, pareja: Pareja) -> str:
 def _tokens_by_players(db: Session, jugador_ids: Set[int]) -> List[str]:
     """
     ✅ Devuelve TODOS los tokens por jugador (sin límite), dedupeados.
-    PC + Teléfono + lo que sea.
     """
     if not jugador_ids:
         return []
@@ -66,14 +68,11 @@ def _tokens_by_players(db: Session, jugador_ids: Set[int]) -> List[str]:
 def _delete_invalid_tokens(invalid_tokens: List[str]) -> None:
     """
     ✅ Limpieza automática de tokens muertos.
-    IMPORTANTE: esto intenta abrir una sesión nueva (para background tasks).
-    Si tu database.py no expone SessionLocal, simplemente se salta sin romper nada.
     """
     if not invalid_tokens:
         return
 
     try:
-        # database.py normalmente tiene SessionLocal
         from database import SessionLocal  # type: ignore
     except Exception:
         print("ℹ️ No pude importar SessionLocal para limpiar tokens inválidos. (Se omite cleanup)")
@@ -82,7 +81,8 @@ def _delete_invalid_tokens(invalid_tokens: List[str]) -> None:
     db2 = None
     try:
         db2 = SessionLocal()
-        (db2.query(PushToken)
+        (
+            db2.query(PushToken)
             .filter(PushToken.fcm_token.in_([t.strip() for t in invalid_tokens if t and t.strip()]))
             .delete(synchronize_session=False)
         )
@@ -113,12 +113,9 @@ def _add_background_push(
     def _job():
         try:
             result = send_push_to_tokens(tokens, title=title, body=body, data=data)
-
-            # ✅ Limpieza de tokens muertos (si firebase_admin.py devuelve invalid_tokens)
             invalids = (result or {}).get("invalid_tokens") or []
             if invalids:
                 _delete_invalid_tokens(invalids)
-
         except Exception as e:
             print("❌ Error enviando push (background):", str(e))
 
@@ -260,15 +257,6 @@ def crear_desafio(
 
     token_list = _tokens_by_players(db, recipients)
 
-    print(
-        "ℹ️ Push debug:",
-        {
-            "jugador_actual": jugador_actual.id,
-            "recipients": sorted(list(recipients)),
-            "token_count": len(token_list),
-        },
-    )
-
     if token_list:
         title = "🆕 Nuevo desafío"
         body = (
@@ -327,7 +315,6 @@ def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     return desafio
 
 
-# ✅ FIX: ganador correcto + set3 obligatorio si van 1-1
 def _gana_retador(data: ResultadoSets) -> bool:
     sets_ret = 0
     sets_des = 0
@@ -410,7 +397,10 @@ def cargar_resultado(
     if desafio.pos_retadora_old is not None and desafio.pos_retada_old is not None:
         puesto_en_juego = min(desafio.pos_retadora_old, desafio.pos_retada_old)
 
-    # ✅ NUEVO: guardar sets en BD
+    desafio.estado = "Jugado"
+    desafio.ganador_pareja_id = ganador_id
+
+    # ✅ Persistimos sets en BD
     desafio.set1_retador = data.set1_retador
     desafio.set1_desafiado = data.set1_desafiado
     desafio.set2_retador = data.set2_retador
@@ -418,11 +408,9 @@ def cargar_resultado(
     desafio.set3_retador = data.set3_retador
     desafio.set3_desafiado = data.set3_desafiado
 
-    # ✅ NUEVO: fecha real jugado/carga
-    desafio.fecha_jugado = datetime.utcnow()
-
-    desafio.estado = "Jugado"
-    desafio.ganador_pareja_id = ganador_id
+    # ✅ Fecha real de juego (DATE)
+    # Si el frontend no manda, ponemos hoy.
+    desafio.fecha_jugado = data.fecha_jugado or date.today()
 
     if retador_gana and not desafio.swap_aplicado:
         retadora.posicion_actual, retada.posicion_actual = (
