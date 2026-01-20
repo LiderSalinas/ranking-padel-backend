@@ -371,14 +371,6 @@ def cargar_resultado(
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado")
-
-    # ✅ ADD: solo permitir cargar si está Aceptado (evita resultados sin aceptar)
-    if desafio.estado != "Aceptado":
-        raise HTTPException(
-            status_code=400,
-            detail="Solo se puede cargar resultado cuando el desafío está en estado Aceptado.",
-        )
-
     if desafio.estado == "Jugado":
         raise HTTPException(status_code=400, detail="Este desafío ya está Jugado")
 
@@ -418,10 +410,6 @@ def cargar_resultado(
 
     # ✅ Fecha real de juego (DATE)
     desafio.fecha_jugado = data.fecha_jugado or date.today()
-
-    # ✅ OPCIONAL FUTURO (si agregás columnas a BD)
-    # desafio.resultado_cargado_por = f"{jugador_actual.nombre} {jugador_actual.apellido}"
-    # desafio.resultado_cargado_at = datetime.utcnow()
 
     if retador_gana and not desafio.swap_aplicado:
         retadora.posicion_actual, retada.posicion_actual = (
