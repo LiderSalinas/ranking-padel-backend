@@ -49,6 +49,15 @@ def _parse_hora(h: str) -> time:
         )
 
 
+# ✅ NUEVO: Solo horas redondas (HH:00)
+def _ensure_hora_redonda(t: time) -> None:
+    if t.minute != 0 or t.second != 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Hora inválida. Solo se permiten horas redondas (ej: 15:00).",
+        )
+
+
 def _pareja_label(db: Session, pareja: Pareja) -> str:
     j1 = db.get(Jugador, pareja.jugador1_id)
     j2 = db.get(Jugador, pareja.jugador2_id)
@@ -261,11 +270,15 @@ def crear_desafio(
     label_retada = _pareja_label(db, retada)
     titulo_desafio = f"{label_retadora} vs {label_retada}"
 
+    # ✅ NUEVO: Validación backend de hora redonda + normalización
+    hora_parsed = _parse_hora(str(payload.hora))
+    _ensure_hora_redonda(hora_parsed)
+
     nuevo_desafio = Desafio(
         retadora_pareja_id=retadora.id,
         retada_pareja_id=retada.id,
         fecha=payload.fecha,
-        hora=payload.hora,
+        hora=hora_parsed,
         observacion=payload.observacion,
         estado="Pendiente",
         titulo_desafio=titulo_desafio,
@@ -288,7 +301,7 @@ def crear_desafio(
     if token_list:
         title = "🆕 Nuevo desafío"
         body = (
-            f"⏱ {payload.fecha.strftime('%d/%m')} {str(payload.hora)[:5]}\n"
+            f"⏱ {payload.fecha.strftime('%d/%m')} {str(hora_parsed)[:5]}\n"
             f"🎾 {titulo_desafio}\n"
             f"👉 Toca para ver el detalle"
         )
@@ -370,6 +383,7 @@ def reprogramar_desafio(
         raise HTTPException(status_code=403, detail="No pertenecés a este desafío.")
 
     nueva_hora = _parse_hora(payload.hora)
+    _ensure_hora_redonda(nueva_hora)  # ✅ NUEVO: solo horas redondas
 
     desafio.fecha = payload.fecha
     desafio.hora = nueva_hora
