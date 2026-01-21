@@ -1,5 +1,5 @@
 # routers/desafios.py
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, time
 from typing import List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
@@ -27,6 +27,27 @@ class ResultadoSets(BaseModel):
     set2_desafiado: int
     set3_retador: Optional[int] = None
     set3_desafiado: Optional[int] = None
+
+
+# ✅ NUEVO: payload para reprogramar (solo fecha y hora)
+class ReprogramarPayload(BaseModel):
+    fecha: date
+    hora: str  # "HH:MM" o "HH:MM:SS"
+
+
+def _parse_hora(h: str) -> time:
+    h = (h or "").strip()
+    if not h:
+        raise HTTPException(status_code=400, detail="Hora inválida.")
+    try:
+        if len(h) == 5:  # HH:MM
+            return datetime.strptime(h, "%H:%M").time()
+        return datetime.strptime(h[:8], "%H:%M:%S").time()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Formato de hora inválido. Use HH:MM o HH:MM:SS",
+        )
 
 
 def _pareja_label(db: Session, pareja: Pareja) -> str:
@@ -312,6 +333,85 @@ def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     desafio.estado = "Rechazado"
     db.commit()
     db.refresh(desafio)
+    return desafio
+
+
+# ✅ NUEVO: reprogramar desafío (solo fecha y hora) + push
+@router.patch("/{desafio_id}/reprogramar", response_model=DesafioResponse)
+def reprogramar_desafio(
+    desafio_id: int,
+    payload: ReprogramarPayload,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    jugador_actual: Jugador = Depends(get_current_jugador),
+):
+    desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
+    if not desafio:
+        raise HTTPException(status_code=404, detail="Desafío no encontrado.")
+
+    # ✅ requisito: solo si está Pendiente
+    if desafio.estado != "Pendiente":
+        raise HTTPException(status_code=400, detail="Solo se puede reprogramar si el desafío está Pendiente.")
+
+    retadora = db.query(Pareja).filter(Pareja.id == desafio.retadora_pareja_id).first()
+    retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
+    if not retadora or not retada:
+        raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
+
+    # ✅ seguridad: solo miembros del desafío
+    if jugador_actual.id not in (
+        retadora.jugador1_id, retadora.jugador2_id,
+        retada.jugador1_id, retada.jugador2_id
+    ):
+        raise HTTPException(status_code=403, detail="No pertenecés a este desafío.")
+
+    nueva_hora = _parse_hora(payload.hora)
+
+    desafio.fecha = payload.fecha
+    desafio.hora = nueva_hora
+
+    db.commit()
+    db.refresh(desafio)
+
+    recipients: Set[int] = {
+        retada.jugador1_id,
+        retada.jugador2_id,
+        retadora.jugador1_id,
+        retadora.jugador2_id,
+        jugador_actual.id,
+    }
+
+    token_list = _tokens_by_players(db, recipients)
+
+    if token_list:
+        label_retadora = _pareja_label(db, retadora)
+        label_retada = _pareja_label(db, retada)
+        titulo = f"{label_retadora} vs {label_retada}"
+
+        title = "📅 Desafío reprogramado"
+        body = (
+            f"🗓 {payload.fecha.strftime('%d/%m')} {str(nueva_hora)[:5]}\n"
+            f"🎾 {titulo}\n"
+            f"👉 Toca para ver el detalle"
+        )
+
+        _add_background_push(
+            background_tasks,
+            token_list,
+            title=title,
+            body=body,
+            data={
+                "type": "desafio",
+                "event": "rescheduled",
+                "desafio_id": str(desafio.id),
+                "estado": str(desafio.estado),
+                "fecha": str(desafio.fecha),
+                "hora": str(desafio.hora),
+                "retadora_pareja_id": str(retadora.id),
+                "retada_pareja_id": str(retada.id),
+            },
+        )
+
     return desafio
 
 
