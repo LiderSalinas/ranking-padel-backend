@@ -18,7 +18,7 @@ router = APIRouter(tags=["Desafios"])
 
 
 class ResultadoSets(BaseModel):
-    # ✅ NUEVO: fecha jugado real (DATE) - viene del frontend como "YYYY-MM-DD"
+    # ✅ fecha jugado real (DATE) - viene del frontend como "YYYY-MM-DD"
     fecha_jugado: Optional[date] = None
 
     set1_retador: int
@@ -29,7 +29,6 @@ class ResultadoSets(BaseModel):
     set3_desafiado: Optional[int] = None
 
 
-# ✅ NUEVO: payload para reprogramar (solo fecha y hora)
 class ReprogramarPayload(BaseModel):
     fecha: date
     hora: str  # "HH:MM" o "HH:MM:SS"
@@ -60,7 +59,8 @@ def _pareja_label(db: Session, pareja: Pareja) -> str:
 
 def _tokens_by_players(db: Session, jugador_ids: Set[int]) -> List[str]:
     """
-    ✅ Devuelve TODOS los tokens por jugador (sin límite), dedupeados.
+    ✅ FIX iPhone: devuelve SOLO 1 token por jugador (el más reciente), dedupeado.
+    - Si el jugador tiene Safari + PWA, evitamos doble notificación.
     """
     if not jugador_ids:
         return []
@@ -72,24 +72,31 @@ def _tokens_by_players(db: Session, jugador_ids: Set[int]) -> List[str]:
         .all()
     )
 
-    seen = set()
-    out = []
+    seen_tokens = set()
+    seen_players = set()
+    out: List[str] = []
+
     for r in rows:
+        jid = r.jugador_id
+        if jid in seen_players:
+            continue
+
         tok = (r.fcm_token or "").strip()
         if not tok or len(tok) < 20:
             continue
-        if tok in seen:
+
+        if tok in seen_tokens:
+            seen_players.add(jid)
             continue
-        seen.add(tok)
+
+        seen_tokens.add(tok)
+        seen_players.add(jid)
         out.append(tok)
 
     return out
 
 
 def _delete_invalid_tokens(invalid_tokens: List[str]) -> None:
-    """
-    ✅ Limpieza automática de tokens muertos.
-    """
     if not invalid_tokens:
         return
 
@@ -336,7 +343,6 @@ def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     return desafio
 
 
-# ✅ NUEVO: reprogramar desafío (solo fecha y hora) + push
 @router.patch("/{desafio_id}/reprogramar", response_model=DesafioResponse)
 def reprogramar_desafio(
     desafio_id: int,
@@ -349,7 +355,6 @@ def reprogramar_desafio(
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
 
-    # ✅ requisito: solo si está Pendiente
     if desafio.estado != "Pendiente":
         raise HTTPException(status_code=400, detail="Solo se puede reprogramar si el desafío está Pendiente.")
 
@@ -358,7 +363,6 @@ def reprogramar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
-    # ✅ seguridad: solo miembros del desafío
     if jugador_actual.id not in (
         retadora.jugador1_id, retadora.jugador2_id,
         retada.jugador1_id, retada.jugador2_id
@@ -500,7 +504,6 @@ def cargar_resultado(
     desafio.estado = "Jugado"
     desafio.ganador_pareja_id = ganador_id
 
-    # ✅ Persistimos sets en BD
     desafio.set1_retador = data.set1_retador
     desafio.set1_desafiado = data.set1_desafiado
     desafio.set2_retador = data.set2_retador
@@ -508,7 +511,6 @@ def cargar_resultado(
     desafio.set3_retador = data.set3_retador
     desafio.set3_desafiado = data.set3_desafiado
 
-    # ✅ Fecha real de juego (DATE)
     desafio.fecha_jugado = data.fecha_jugado or date.today()
 
     if retador_gana and not desafio.swap_aplicado:
