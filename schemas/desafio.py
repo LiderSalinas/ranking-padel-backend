@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class DesafioCreate(BaseModel):
-    retadora_pareja_id: int
+    retadora_pareja_id: Optional [int] = None
     retada_pareja_id: int
     fecha: date
     hora: time

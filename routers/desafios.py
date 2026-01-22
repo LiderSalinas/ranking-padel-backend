@@ -9,12 +9,23 @@ from pydantic import BaseModel
 
 from database import get_db
 from models import Pareja, Desafio, Jugador, PushToken
-from schemas.desafio import DesafioCreate, DesafioResponse, DesafioHistorialItem
+from schemas.desafio import DesafioResponse, DesafioHistorialItem
 from core.settings import settings
 from core.security import get_current_jugador
 from core.firebase_admin import send_push_to_tokens
 
 router = APIRouter(tags=["Desafios"])
+
+
+# ✅ NUEVO: payload de creación (retadora se calcula por token)
+class DesafioCreateAuto(BaseModel):
+    # compat: si viene, se ignora (para no romper front viejo)
+    retadora_pareja_id: Optional[int] = None
+
+    retada_pareja_id: int
+    fecha: date
+    hora: str  # "HH:MM" o "HH:MM:SS"
+    observacion: Optional[str] = None
 
 
 class ResultadoSets(BaseModel):
@@ -159,6 +170,40 @@ def _add_background_push(
     background_tasks.add_task(_job)
 
 
+# ✅ NUEVO: endpoint para mostrar la DUPLA RETADORA bloqueada en el frontend
+@router.get("/mi-dupla")
+def mi_dupla(
+    db: Session = Depends(get_db),
+    jugador_actual: Jugador = Depends(get_current_jugador),
+):
+    p = (
+        db.query(Pareja)
+        .filter(
+            Pareja.activo.is_(True),
+            or_(
+                Pareja.jugador1_id == jugador_actual.id,
+                Pareja.jugador2_id == jugador_actual.id,
+            ),
+        )
+        .order_by(Pareja.id.desc())
+        .first()
+    )
+
+    if not p:
+        raise HTTPException(status_code=404, detail="No tenés una DUPLA activa asignada.")
+
+    etiqueta = _pareja_label(db, p)
+    nombre = getattr(p, "nombre", None)
+
+    return {
+        "id": p.id,
+        "etiqueta": etiqueta,
+        "nombre": nombre,
+        "grupo": getattr(p, "grupo", None),
+        "posicion": getattr(p, "posicion_actual", None),
+    }
+
+
 @router.get("/mis-proximos", response_model=List[DesafioResponse])
 def mis_proximos(
     db: Session = Depends(get_db),
@@ -220,7 +265,7 @@ def listar_mis_desafios(
                 Desafio.retada_pareja_id.in_(parejas_ids_subq),
             )
         )
-        .order_by(Desafio.fecha.desc(), Desafio.hora.desc())
+        .order_by(Desafio.fecha.desc(), Desafio.hora.desc(), Desafio.id.desc())
         .all()
     )
     return desafios
@@ -239,18 +284,29 @@ def listar_proximos_desafios(db: Session = Depends(get_db)):
 
 @router.post("/", response_model=DesafioResponse, status_code=status.HTTP_201_CREATED)
 def crear_desafio(
-    payload: DesafioCreate,
+    payload: DesafioCreateAuto,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
+    # ✅ retadora automática por token (bloquea el fraude y el error humano)
     retadora = (
         db.query(Pareja)
-        .filter(Pareja.id == payload.retadora_pareja_id, Pareja.activo.is_(True))
+        .filter(
+            Pareja.activo.is_(True),
+            or_(
+                Pareja.jugador1_id == jugador_actual.id,
+                Pareja.jugador2_id == jugador_actual.id,
+            ),
+        )
+        .order_by(Pareja.id.desc())
         .first()
     )
     if not retadora:
-        raise HTTPException(status_code=404, detail="Pareja retadora no encontrada o inactiva.")
+        raise HTTPException(
+            status_code=400,
+            detail="Tu cuenta no tiene una DUPLA activa asignada. Contactá al admin.",
+        )
 
     retada = (
         db.query(Pareja)
@@ -258,10 +314,10 @@ def crear_desafio(
         .first()
     )
     if not retada:
-        raise HTTPException(status_code=404, detail="Pareja retada no encontrada o inactiva.")
+        raise HTTPException(status_code=404, detail="Dupla desafiada no encontrada o inactiva.")
 
     if retadora.id == retada.id:
-        raise HTTPException(status_code=400, detail="Una pareja no puede desafiarse a sí misma.")
+        raise HTTPException(status_code=400, detail="No podés desafiar a tu misma dupla.")
 
     if settings.STRICT_RULES:
         pass
@@ -270,7 +326,7 @@ def crear_desafio(
     label_retada = _pareja_label(db, retada)
     titulo_desafio = f"{label_retadora} vs {label_retada}"
 
-    # ✅ NUEVO: Validación backend de hora redonda + normalización
+    # ✅ validación backend hora redonda + normalización
     hora_parsed = _parse_hora(str(payload.hora))
     _ensure_hora_redonda(hora_parsed)
 
@@ -383,7 +439,7 @@ def reprogramar_desafio(
         raise HTTPException(status_code=403, detail="No pertenecés a este desafío.")
 
     nueva_hora = _parse_hora(payload.hora)
-    _ensure_hora_redonda(nueva_hora)  # ✅ NUEVO: solo horas redondas
+    _ensure_hora_redonda(nueva_hora)
 
     desafio.fecha = payload.fecha
     desafio.hora = nueva_hora
@@ -605,7 +661,7 @@ def listar_desafios_pareja(pareja_id: int, db: Session = Depends(get_db)):
                 Desafio.retada_pareja_id == pareja_id,
             )
         )
-        .order_by(Desafio.fecha.desc(), Desafio.hora.desc())
+        .order_by(Desafio.fecha.desc(), Desafio.hora.desc(), Desafio.id.desc())
         .all()
     )
     return desafios
