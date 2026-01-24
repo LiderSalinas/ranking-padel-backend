@@ -9,8 +9,8 @@ from pydantic import BaseModel
 class JugadorDatos(BaseModel):
     nombre: str
     apellido: str
-    telefono: str
-    email: str
+    telefono: Optional[str] = None   # ✅ FIX
+    email: Optional[str] = None      # (recomendado)
 
 
 class JugadorEnPareja(JugadorDatos):
