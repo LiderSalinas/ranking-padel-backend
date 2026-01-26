@@ -22,6 +22,7 @@ from schemas.pair import (
 
 router = APIRouter()
 
+
 # --------- Helpers ---------
 def get_or_create_jugador(data: JugadorDatos, db: Session) -> models.Jugador:
     """
@@ -31,11 +32,7 @@ def get_or_create_jugador(data: JugadorDatos, db: Session) -> models.Jugador:
     jugador = None
 
     if data.email:
-        jugador = (
-            db.query(models.Jugador)
-            .filter(models.Jugador.email == data.email)
-            .first()
-        )
+        jugador = db.query(models.Jugador).filter(models.Jugador.email == data.email).first()
 
     if not jugador:
         jugador = models.Jugador(
@@ -69,17 +66,59 @@ def _normalize_grupo_filter(grupo: Optional[str]) -> Optional[str]:
     return g if g else None
 
 
+def _categoria_to_genero(categoria: str) -> Optional[str]:
+    """
+    Convierte categoría -> genero guardado en BD
+    - "Femenino"  -> "F"
+    - "Masculino" -> "M"
+    """
+    c = (categoria or "").strip().lower()
+    if c == "femenino":
+        return "F"
+    if c == "masculino":
+        return "M"
+    return None
+
+
+def _genero_from_grupo(grupo: str) -> Optional[str]:
+    """
+    Lee el prefijo del grupo y devuelve genero:
+      "Femenino A" -> "F"
+      "Masculino B" -> "M"
+    """
+    g = (grupo or "").strip()
+    if not g:
+        return None
+    pref = g.split()[0].strip()
+    return _categoria_to_genero(pref)
+
+
 def _apply_grupo_filter(q, grupo: Optional[str]):
     g = _normalize_grupo_filter(grupo)
     if not g:
         return q
 
     gl = g.lower()
+
+    # categoría completa: "Femenino" / "Masculino"
     if gl == "femenino" or gl == "masculino":
-        # categoría completa
+        gen = _categoria_to_genero(g)
+        # doble filtro: por texto del grupo y por genero (si existe en tu BD)
+        if gen:
+            return q.filter(
+                models.Pareja.grupo.ilike(f"{g}%"),
+                or_(models.Pareja.genero.is_(None), models.Pareja.genero == gen),
+            )
         return q.filter(models.Pareja.grupo.ilike(f"{g}%"))
 
     # exacto (ej: "Femenino A", "Masculino B")
+    gen = _genero_from_grupo(g)
+    if gen:
+        return q.filter(
+            models.Pareja.grupo == g,
+            or_(models.Pareja.genero.is_(None), models.Pareja.genero == gen),
+        )
+
     return q.filter(models.Pareja.grupo == g)
 
 
@@ -137,6 +176,9 @@ def registrar_pareja(payload: ParejaRegistro, db: Session = Depends(get_db)):
     )
     next_pos = (last_pos[0] + 1) if last_pos and last_pos[0] is not None else 1
 
+    # ✅ genero automático por grupo (porque ya lo agregaste en Neon)
+    genero_auto = _genero_from_grupo(payload.grupo)
+
     # 5) Crear la pareja
     pareja = models.Pareja(
         jugador1_id=j1.id,
@@ -144,6 +186,7 @@ def registrar_pareja(payload: ParejaRegistro, db: Session = Depends(get_db)):
         capitan_id=capitan.id,
         grupo=payload.grupo,
         posicion_actual=next_pos,
+        genero=genero_auto,  # ✅ NUEVO (no rompe, es nullable)
         activo=True,
     )
 
@@ -278,7 +321,7 @@ def obtener_detalle_pareja(
 
     jugador1 = db.query(models.Jugador).filter(models.Jugador.id == pareja.jugador1_id).first()
     jugador2 = db.query(models.Jugador).filter(models.Jugador.id == pareja.jugador2_id).first()
-    capitan  = db.query(models.Jugador).filter(models.Jugador.id == pareja.capitan_id).first()
+    capitan = db.query(models.Jugador).filter(models.Jugador.id == pareja.capitan_id).first()
 
     if not jugador1 or not jugador2 or not capitan:
         raise HTTPException(
@@ -307,7 +350,6 @@ def obtener_detalle_pareja(
         grupo=pareja.grupo,
         posicion_actual=pareja.posicion_actual,
         activo=pareja.activo,
-
         jugador1=JugadorEnPareja(
             id=jugador1.id,
             nombre=jugador1.nombre,
@@ -332,7 +374,6 @@ def obtener_detalle_pareja(
             email=capitan.email,
             foto_url=getattr(capitan, "foto_url", None),
         ),
-
         partidos_jugados=partidos_jugados,
         victorias=victorias,
         derrotas=derrotas,
