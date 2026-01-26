@@ -1,9 +1,9 @@
 # routers/desafios.py
 from datetime import date, timedelta, datetime, time
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -45,6 +45,7 @@ class ReprogramarPayload(BaseModel):
     hora: str  # "HH:MM" o "HH:MM:SS"
 
 
+# ----------------- Helpers de reglas -----------------
 def _parse_hora(h: str) -> time:
     h = (h or "").strip()
     if not h:
@@ -60,7 +61,7 @@ def _parse_hora(h: str) -> time:
         )
 
 
-# ✅ NUEVO: Solo horas redondas (HH:00)
+# ✅ Solo horas redondas (HH:00)
 def _ensure_hora_redonda(t: time) -> None:
     if t.minute != 0 or t.second != 0:
         raise HTTPException(
@@ -75,6 +76,162 @@ def _pareja_label(db: Session, pareja: Pareja) -> str:
     n1 = f"{j1.nombre} {j1.apellido}".strip() if j1 else f"Jugador {pareja.jugador1_id}"
     n2 = f"{j2.nombre} {j2.apellido}".strip() if j2 else f"Jugador {pareja.jugador2_id}"
     return f"{n1} / {n2}"
+
+
+def _categoria_from_grupo(grupo: str) -> str:
+    """
+    Con tu BD real:
+      "Femenino A" -> "Femenino"
+      "Masculino B" -> "Masculino"
+    """
+    g = (grupo or "").strip()
+    if not g:
+        return ""
+    return g.split()[0].capitalize()
+
+
+def _division_from_grupo(grupo: str) -> str:
+    """
+    "Femenino A" -> "A"
+    "Masculino B" -> "B"
+    """
+    g = (grupo or "").strip()
+    parts = g.split()
+    if len(parts) >= 2:
+        return parts[1].upper()
+    return ""
+
+
+def _semana_range(fecha: date) -> Tuple[date, date]:
+    """
+    Semana Lunes-Domingo.
+    Devuelve (inicio, fin_inclusive).
+    """
+    # Monday=0 ... Sunday=6
+    start = fecha - timedelta(days=fecha.weekday())
+    end = start + timedelta(days=6)
+    return start, end
+
+
+def _count_partidos_semana(db: Session, pareja_id: int, fecha: date) -> int:
+    """
+    Regla: Máx 2 partidos por semana por pareja.
+    Cuenta desafíos en estados Pendiente/Aceptado/Jugado cuya fecha cae en esa semana.
+    """
+    w_start, w_end = _semana_range(fecha)
+    estados = ["Pendiente", "Aceptado", "Jugado"]
+
+    return (
+        db.query(Desafio)
+        .filter(
+            Desafio.estado.in_(estados),
+            Desafio.fecha >= w_start,
+            Desafio.fecha <= w_end,
+            or_(
+                Desafio.retadora_pareja_id == pareja_id,
+                Desafio.retada_pareja_id == pareja_id,
+            ),
+        )
+        .count()
+    )
+
+
+def _interdivision_allowed(db: Session, retadora: Pareja, retada: Pareja) -> bool:
+    """
+    Regla:
+      - Top 3 del grupo B puede desafiar a las últimas 3 del grupo A (misma categoría Masculino/Femenino)
+      - Especial: Puesto 1 del B puede desafiar al Puesto 18 del A
+    """
+    # misma categoría ya se valida afuera
+    div_r = _division_from_grupo(retadora.grupo)
+    div_d = _division_from_grupo(retada.grupo)
+
+    if not div_r or not div_d:
+        return False
+
+    # Solo B -> A
+    if not (div_r == "B" and div_d == "A"):
+        return False
+
+    # debe haber posiciones
+    if retadora.posicion_actual is None or retada.posicion_actual is None:
+        return False
+
+    # regla especial 1B -> 18A
+    if retadora.posicion_actual == 1 and retada.posicion_actual == 18:
+        return True
+
+    # top 3 de B
+    if retadora.posicion_actual not in (1, 2, 3):
+        return False
+
+    # últimas 3 de A: calculamos max en A (de esa categoría)
+    categoria = _categoria_from_grupo(retadora.grupo)
+    grupo_A = f"{categoria} A"
+
+    max_pos_A = (
+        db.query(Pareja.posicion_actual)
+        .filter(Pareja.activo.is_(True), Pareja.grupo == grupo_A, Pareja.posicion_actual.isnot(None))
+        .order_by(Pareja.posicion_actual.desc())
+        .first()
+    )
+    if not max_pos_A or max_pos_A[0] is None:
+        return False
+
+    last = max_pos_A[0]
+    ultimas = {last, max(1, last - 1), max(1, last - 2)}
+
+    return retada.posicion_actual in ultimas
+
+
+def _validate_desafio_rules(db: Session, retadora: Pareja, retada: Pareja, fecha: date) -> None:
+    """
+    Aplica TODAS las reglas duras:
+      - no cruza Masculino/Femenino
+      - max 2 partidos por semana por pareja
+      - dentro de la misma división: max 3 puestos
+      - interdivisión B->A: solo top3 vs last3 (+ especial 1B->18A)
+    """
+    cat_r = _categoria_from_grupo(retadora.grupo)
+    cat_d = _categoria_from_grupo(retada.grupo)
+    if not cat_r or not cat_d or cat_r != cat_d:
+        raise HTTPException(
+            status_code=400,
+            detail="No se permiten desafíos entre Masculino y Femenino.",
+        )
+
+    # Max 2 partidos por semana (para ambos)
+    c1 = _count_partidos_semana(db, retadora.id, fecha)
+    if c1 >= 2:
+        raise HTTPException(status_code=400, detail="Tu dupla ya tiene 2 partidos esta semana.")
+    c2 = _count_partidos_semana(db, retada.id, fecha)
+    if c2 >= 2:
+        raise HTTPException(status_code=400, detail="La dupla desafiada ya tiene 2 partidos esta semana.")
+
+    # Misma división o interdivisión
+    if retadora.grupo == retada.grupo:
+        # regla max 3 puestos (y solo hacia arriba)
+        if retadora.posicion_actual is None or retada.posicion_actual is None:
+            return
+
+        # retadora debe estar más abajo (número mayor) y retada arriba (número menor)
+        if retada.posicion_actual >= retadora.posicion_actual:
+            raise HTTPException(
+                status_code=400,
+                detail="Solo podés desafiar a una dupla por encima tuyo (mejor posición).",
+            )
+
+        diff = retadora.posicion_actual - retada.posicion_actual
+        if diff > 3:
+            raise HTTPException(status_code=400, detail="Solo se puede desafiar hasta 3 puestos arriba.")
+        return
+
+    # si no es mismo grupo, debe cumplir interdivisión
+    if not _interdivision_allowed(db, retadora, retada):
+        raise HTTPException(
+            status_code=400,
+            detail="Desafío no permitido entre grupos. Solo Top 3 de B puede desafiar a últimas 3 de A (misma categoría).",
+        )
 
 
 def _tokens_by_players(db: Session, jugador_ids: Set[int]) -> List[str]:
@@ -170,7 +327,85 @@ def _add_background_push(
     background_tasks.add_task(_job)
 
 
-# ✅ NUEVO: endpoint para mostrar la DUPLA RETADORA bloqueada en el frontend
+def _apply_forfeit_if_expired(db: Session) -> int:
+    """
+    Regla: el desafiado tiene 3 días para aceptar/rechazar.
+    Si vence y sigue Pendiente -> pierde posición automáticamente (gana retador).
+    Implementación:
+      - estado => Jugado
+      - ganador_pareja_id => retadora
+      - swap posiciones (y si fue interdivisión y gana retador => swap grupo+pos)
+      - fecha_jugado => hoy
+    Retorna cuántos se actualizaron.
+    """
+    now = datetime.utcnow()
+    limite = now - timedelta(days=3)
+
+    expired = (
+        db.query(Desafio)
+        .filter(
+            Desafio.estado == "Pendiente",
+            Desafio.created_at <= limite,
+        )
+        .all()
+    )
+
+    if not expired:
+        return 0
+
+    updated = 0
+    for d in expired:
+        retadora = db.query(Pareja).filter(Pareja.id == d.retadora_pareja_id).first()
+        retada = db.query(Pareja).filter(Pareja.id == d.retada_pareja_id).first()
+        if not retadora or not retada:
+            continue
+
+        # si cruza categorías, no aplicamos (data inconsistente)
+        if _categoria_from_grupo(retadora.grupo) != _categoria_from_grupo(retada.grupo):
+            continue
+
+        d.pos_retadora_old = retadora.posicion_actual
+        d.pos_retada_old = retada.posicion_actual
+
+        # gana retador por forfeit
+        d.estado = "Jugado"
+        d.ganador_pareja_id = retadora.id
+        d.fecha_jugado = date.today()
+
+        # aplicar swap como si retador ganó
+        if retadora.posicion_actual is not None and retada.posicion_actual is not None:
+            # interdivisión: si era permitido, y retador gana => swap grupo+pos
+            if retadora.grupo != retada.grupo and _interdivision_allowed(db, retadora, retada):
+                old_retadora_grupo = retadora.grupo
+                old_retadora_pos = retadora.posicion_actual
+
+                retadora.grupo = retada.grupo
+                retadora.posicion_actual = retada.posicion_actual
+
+                retada.grupo = old_retadora_grupo
+                retada.posicion_actual = old_retadora_pos
+
+                d.swap_aplicado = True
+                d.ranking_aplicado = True
+            else:
+                # mismo grupo: swap de posiciones
+                retadora.posicion_actual, retada.posicion_actual = (
+                    retada.posicion_actual,
+                    retadora.posicion_actual,
+                )
+                d.swap_aplicado = True
+                d.ranking_aplicado = True
+
+        updated += 1
+
+    if updated:
+        db.commit()
+
+    return updated
+
+
+# ----------------- Endpoints -----------------
+
 @router.get("/mi-dupla")
 def mi_dupla(
     db: Session = Depends(get_db),
@@ -209,6 +444,9 @@ def mis_proximos(
     db: Session = Depends(get_db),
     current_jugador: Jugador = Depends(get_current_jugador),
 ):
+    # ✅ aplicar forfeits vencidos antes de listar
+    _apply_forfeit_if_expired(db)
+
     hoy = date.today()
 
     parejas_ids_subq = (
@@ -246,6 +484,9 @@ def listar_mis_desafios(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
+    # ✅ aplicar forfeits vencidos antes de listar
+    _apply_forfeit_if_expired(db)
+
     parejas_ids_subq = (
         db.query(Pareja.id)
         .filter(
@@ -273,6 +514,9 @@ def listar_mis_desafios(
 
 @router.get("/proximos", response_model=List[DesafioResponse])
 def listar_proximos_desafios(db: Session = Depends(get_db)):
+    # ✅ aplicar forfeits vencidos antes de listar
+    _apply_forfeit_if_expired(db)
+
     desafios = (
         db.query(Desafio)
         .filter(Desafio.estado.in_(["Pendiente", "Aceptado"]))
@@ -289,6 +533,9 @@ def crear_desafio(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
+    # ✅ aplicar forfeits vencidos antes de crear (limpia pendientes viejos)
+    _apply_forfeit_if_expired(db)
+
     # ✅ retadora automática por token (bloquea el fraude y el error humano)
     retadora = (
         db.query(Pareja)
@@ -319,16 +566,16 @@ def crear_desafio(
     if retadora.id == retada.id:
         raise HTTPException(status_code=400, detail="No podés desafiar a tu misma dupla.")
 
-    if settings.STRICT_RULES:
-        pass
+    # ✅ validación backend hora redonda + normalización
+    hora_parsed = _parse_hora(str(payload.hora))
+    _ensure_hora_redonda(hora_parsed)
+
+    # ✅ REGLAS DURAS (siempre)
+    _validate_desafio_rules(db, retadora, retada, payload.fecha)
 
     label_retadora = _pareja_label(db, retadora)
     label_retada = _pareja_label(db, retada)
     titulo_desafio = f"{label_retadora} vs {label_retada}"
-
-    # ✅ validación backend hora redonda + normalización
-    hora_parsed = _parse_hora(str(payload.hora))
-    _ensure_hora_redonda(hora_parsed)
 
     nuevo_desafio = Desafio(
         retadora_pareja_id=retadora.id,
@@ -384,12 +631,18 @@ def crear_desafio(
 
 @router.post("/{desafio_id}/aceptar", response_model=DesafioResponse)
 def aceptar_desafio(desafio_id: int, db: Session = Depends(get_db)):
+    # ✅ aplicar forfeits vencidos antes de operar
+    _apply_forfeit_if_expired(db)
+
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
     if desafio.estado == "Jugado":
         raise HTTPException(status_code=400, detail="No se puede aceptar un desafío que ya fue jugado.")
+    if desafio.estado != "Pendiente":
+        raise HTTPException(status_code=400, detail="Solo se puede aceptar si está Pendiente.")
 
+    # plazo 3 días (si venció, ya se habría forfeit-eado arriba)
     desafio.estado = "Aceptado"
     db.commit()
     db.refresh(desafio)
@@ -398,6 +651,9 @@ def aceptar_desafio(desafio_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{desafio_id}/rechazar", response_model=DesafioResponse)
 def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
+    # ✅ aplicar forfeits vencidos antes de operar
+    _apply_forfeit_if_expired(db)
+
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
@@ -405,6 +661,8 @@ def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="No se puede rechazar un desafío que ya fue jugado.")
     if desafio.estado == "Rechazado":
         raise HTTPException(status_code=400, detail="Este desafío ya está rechazado.")
+    if desafio.estado != "Pendiente":
+        raise HTTPException(status_code=400, detail="Solo se puede rechazar si está Pendiente.")
 
     desafio.estado = "Rechazado"
     db.commit()
@@ -420,6 +678,9 @@ def reprogramar_desafio(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
+    # ✅ aplicar forfeits vencidos antes de operar
+    _apply_forfeit_if_expired(db)
+
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
@@ -440,6 +701,9 @@ def reprogramar_desafio(
 
     nueva_hora = _parse_hora(payload.hora)
     _ensure_hora_redonda(nueva_hora)
+
+    # ✅ Regla de max 2 partidos por semana: revalidar con nueva fecha
+    _validate_desafio_rules(db, retadora, retada, payload.fecha)
 
     desafio.fecha = payload.fecha
     desafio.hora = nueva_hora
@@ -542,6 +806,9 @@ def cargar_resultado(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
+    # ✅ aplicar forfeits vencidos antes de operar
+    _apply_forfeit_if_expired(db)
+
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado")
@@ -553,8 +820,13 @@ def cargar_resultado(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
-    if retadora.grupo != retada.grupo:
-        raise HTTPException(status_code=400, detail="No se puede aplicar ranking entre grupos distintos.")
+    # ✅ No cruzar Masculino/Femenino
+    if _categoria_from_grupo(retadora.grupo) != _categoria_from_grupo(retada.grupo):
+        raise HTTPException(status_code=400, detail="No se puede jugar entre Masculino y Femenino.")
+
+    # ✅ Si es interdivisión, debe ser permitido
+    if retadora.grupo != retada.grupo and not _interdivision_allowed(db, retadora, retada):
+        raise HTTPException(status_code=400, detail="No se puede aplicar resultado: interdivisión no permitida.")
 
     if jugador_actual.id not in (
         retadora.jugador1_id, retadora.jugador2_id,
@@ -583,12 +855,30 @@ def cargar_resultado(
 
     desafio.fecha_jugado = data.fecha_jugado or date.today()
 
+    # ✅ Aplicación de ranking:
+    # - mismo grupo: si gana retador => swap posiciones
+    # - interdivisión B->A: si gana retador => swap grupo+pos entre ambos
     if retador_gana and not desafio.swap_aplicado:
-        retadora.posicion_actual, retada.posicion_actual = (
-            retada.posicion_actual,
-            retadora.posicion_actual,
-        )
-        desafio.swap_aplicado = True
+        if retadora.posicion_actual is not None and retada.posicion_actual is not None:
+            if retadora.grupo != retada.grupo and _interdivision_allowed(db, retadora, retada):
+                old_retadora_grupo = retadora.grupo
+                old_retadora_pos = retadora.posicion_actual
+
+                retadora.grupo = retada.grupo
+                retadora.posicion_actual = retada.posicion_actual
+
+                retada.grupo = old_retadora_grupo
+                retada.posicion_actual = old_retadora_pos
+
+                desafio.swap_aplicado = True
+            else:
+                retadora.posicion_actual, retada.posicion_actual = (
+                    retada.posicion_actual,
+                    retadora.posicion_actual,
+                )
+                desafio.swap_aplicado = True
+        else:
+            desafio.swap_aplicado = False
     else:
         desafio.swap_aplicado = False
 
@@ -653,6 +943,9 @@ def cargar_resultado(
 
 @router.get("/pareja/{pareja_id}", response_model=List[DesafioHistorialItem])
 def listar_desafios_pareja(pareja_id: int, db: Session = Depends(get_db)):
+    # ✅ aplicar forfeits vencidos antes de listar
+    _apply_forfeit_if_expired(db)
+
     desafios = (
         db.query(Desafio)
         .filter(
@@ -673,6 +966,9 @@ def obtener_desafio(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
+    # ✅ aplicar forfeits vencidos antes de leer
+    _apply_forfeit_if_expired(db)
+
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")

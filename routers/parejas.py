@@ -55,6 +55,34 @@ def nombre_pareja(j1: models.Jugador, j2: models.Jugador) -> str:
     return f"{j1.nombre} {j1.apellido} / {j2.nombre} {j2.apellido}"
 
 
+def _normalize_grupo_filter(grupo: Optional[str]) -> Optional[str]:
+    """
+    Soporta:
+    - grupo="Femenino"  -> filtra "Femenino %"
+    - grupo="Masculino" -> filtra "Masculino %"
+    - grupo="Femenino A" o "Masculino B" -> exact match
+    - grupo="A"/"B" (legacy) -> no lo usamos para género, pero no rompemos (match exact si existe)
+    """
+    if not grupo:
+        return None
+    g = (grupo or "").strip()
+    return g if g else None
+
+
+def _apply_grupo_filter(q, grupo: Optional[str]):
+    g = _normalize_grupo_filter(grupo)
+    if not g:
+        return q
+
+    gl = g.lower()
+    if gl == "femenino" or gl == "masculino":
+        # categoría completa
+        return q.filter(models.Pareja.grupo.ilike(f"{g}%"))
+
+    # exacto (ej: "Femenino A", "Masculino B")
+    return q.filter(models.Pareja.grupo == g)
+
+
 # --------- Endpoints ---------
 @router.post(
     "/registrar",
@@ -132,12 +160,13 @@ def listar_parejas(
     db: Session = Depends(get_db),
 ):
     """
-    Lista parejas. Si se pasa ?grupo=A filtra por grupo.
+    Lista parejas. Si se pasa ?grupo=... filtra.
+    Soporta:
+      - grupo=Femenino | Masculino  (categoría)
+      - grupo=Femenino A | Masculino B (exacto)
     """
     query = db.query(models.Pareja)
-
-    if grupo:
-        query = query.filter(models.Pareja.grupo == grupo)
+    query = _apply_grupo_filter(query, grupo)
 
     parejas = query.order_by(models.Pareja.grupo, models.Pareja.posicion_actual).all()
     return parejas
@@ -285,7 +314,7 @@ def obtener_detalle_pareja(
             apellido=jugador1.apellido,
             telefono=jugador1.telefono,
             email=jugador1.email,
-            foto_url=getattr(jugador1, "foto_url", None),  # ✅ NUEVO
+            foto_url=getattr(jugador1, "foto_url", None),
         ),
         jugador2=JugadorEnPareja(
             id=jugador2.id,
@@ -293,7 +322,7 @@ def obtener_detalle_pareja(
             apellido=jugador2.apellido,
             telefono=jugador2.telefono,
             email=jugador2.email,
-            foto_url=getattr(jugador2, "foto_url", None),  # ✅ NUEVO
+            foto_url=getattr(jugador2, "foto_url", None),
         ),
         capitan=JugadorEnPareja(
             id=capitan.id,
@@ -301,7 +330,7 @@ def obtener_detalle_pareja(
             apellido=capitan.apellido,
             telefono=capitan.telefono,
             email=capitan.email,
-            foto_url=getattr(capitan, "foto_url", None),  # ✅ NUEVO
+            foto_url=getattr(capitan, "foto_url", None),
         ),
 
         partidos_jugados=partidos_jugados,
@@ -318,7 +347,9 @@ def listar_parejas_desafiables(
     """
     ✅ REAL:
     Lista parejas desafiables desde la BD.
-    (Por ahora devolvemos todas las activas con posición; después aplicamos reglas duras)
+    Ahora soporta filtros:
+      - grupo=Femenino | Masculino (categoría)
+      - grupo=Femenino A | Masculino B (exacto)
     """
     q = (
         db.query(models.Pareja)
@@ -326,8 +357,7 @@ def listar_parejas_desafiables(
         .filter(models.Pareja.activo.is_(True), models.Pareja.posicion_actual.isnot(None))
     )
 
-    if grupo:
-        q = q.filter(models.Pareja.grupo == grupo)
+    q = _apply_grupo_filter(q, grupo)
 
     parejas = q.order_by(models.Pareja.grupo.asc(), models.Pareja.posicion_actual.asc()).all()
 
@@ -345,6 +375,8 @@ def listar_parejas_desafiables(
         )
 
     return resp
+
+
 @router.get("/cards", response_model=List[ParejaCardResponse])
 def listar_parejas_cards(
     grupo: str | None = None,
@@ -353,6 +385,9 @@ def listar_parejas_cards(
     """
     ✅ Vista pública tipo AppSheet:
     Cards por pareja con fotos + stats.
+    Filtro:
+      - grupo=Femenino | Masculino (categoría)
+      - grupo=Femenino A | Masculino B (exacto)
     """
     q = (
         db.query(models.Pareja)
@@ -360,8 +395,7 @@ def listar_parejas_cards(
         .filter(models.Pareja.activo.is_(True), models.Pareja.posicion_actual.isnot(None))
     )
 
-    if grupo:
-        q = q.filter(models.Pareja.grupo == grupo)
+    q = _apply_grupo_filter(q, grupo)
 
     parejas = q.order_by(models.Pareja.grupo.asc(), models.Pareja.posicion_actual.asc()).all()
 

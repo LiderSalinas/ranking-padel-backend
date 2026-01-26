@@ -27,6 +27,8 @@ class ParejaRegistro(BaseModel):
     jugador2: JugadorDatos
     capitan: int   # 1 ó 2
     grupo: str
+    # ✅ NUEVO: "M" o "F" (opcional por compatibilidad)
+    genero: Optional[str] = None
 
 
 # ---- Respuestas básicas de pareja ----
@@ -38,6 +40,8 @@ class ParejaResponse(BaseModel):
     grupo: str
     posicion_actual: int
     activo: bool
+    # ✅ NUEVO
+    genero: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -69,6 +73,9 @@ class ParejaDetalleResponse(BaseModel):
     grupo: str
     posicion_actual: int
     activo: bool
+    # ✅ NUEVO
+    genero: Optional[str] = None
+
     jugador1: JugadorEnPareja
     jugador2: JugadorEnPareja
     capitan: JugadorEnPareja
@@ -83,6 +90,8 @@ class ParejaDesafiableResponse(BaseModel):
     nombre: str
     posicion_actual: int
     grupo: str  # ✅ faltaba
+    # ✅ NUEVO
+    genero: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -94,6 +103,9 @@ class ParejaCardResponse(BaseModel):
     grupo: str
     posicion_actual: int
     activo: bool
+
+    # ✅ NUEVO
+    genero: Optional[str] = None
 
     nombre_pareja: str
 

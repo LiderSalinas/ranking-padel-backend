@@ -86,6 +86,9 @@ class Pareja(Base):
     grupo = Column(String(1), nullable=False)
     posicion_actual = Column(Integer, nullable=True, index=True)
 
+    # ✅ NUEVO: género de la pareja ("M" o "F"). Nullable para no romper data existente.
+    genero = Column(String(1), nullable=True, index=True)
+
     activo = Column(Boolean, default=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
