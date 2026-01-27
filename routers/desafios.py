@@ -735,15 +735,15 @@ def aceptar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas.")
 
-    # ✅ Permiso: cualquiera que pertenezca a una de las 2 parejas
-    if jugador_actual.id not in (
-        retadora.jugador1_id,
-        retadora.jugador2_id,
-        retada.jugador1_id,
-        retada.jugador2_id,
-    ):
-        raise HTTPException(status_code=403, detail="Solo las parejas del partido pueden aceptar este desafío.")
+   # ✅ Permiso: SOLO la pareja RETADA (desafiado) puede aceptar
+    if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
+        raise HTTPException(
+        status_code=403,
+        detail="Solo la dupla desafiada (retada) puede aceptar este desafío.",
+    )
 
+    
+        
     desafio.estado = "Aceptado"
     db.commit()
     db.refresh(desafio)
@@ -777,15 +777,14 @@ def rechazar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas.")
 
-    # ✅ Permiso: cualquiera que pertenezca a una de las 2 parejas
-    if jugador_actual.id not in (
-        retadora.jugador1_id,
-        retadora.jugador2_id,
-        retada.jugador1_id,
-        retada.jugador2_id,
-    ):
-        raise HTTPException(status_code=403, detail="Solo las parejas del partido pueden rechazar este desafío.")
+    # ✅ Permiso: SOLO la pareja RETADA (desafiado) puede rechazar
+    if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
+         raise HTTPException(
+        status_code=403,
+        detail="Solo la dupla desafiada (retada) puede rechazar este desafío.",
+     )
 
+         
     desafio.estado = "Rechazado"
     db.commit()
     db.refresh(desafio)
