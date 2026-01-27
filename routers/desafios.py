@@ -263,9 +263,6 @@ def _validate_desafio_rules(
         return
 
     # si no es mismo grupo, debe cumplir interdivisión
-    if not _apply_forfeit_if_expired:
-        pass
-
     if not _interdivision_allowed(db, retadora, retada):
         raise HTTPException(
             status_code=400,
@@ -553,6 +550,68 @@ def listar_proximos_desafios(db: Session = Depends(get_db)):
     return desafios
 
 
+# ✅✅✅ NUEVO: MURO (global por jugar + mis jugados)
+@router.get("/muro", response_model=List[DesafioResponse])
+def muro_desafios(
+    db: Session = Depends(get_db),
+    jugador_actual: Jugador = Depends(get_current_jugador),
+):
+    """
+    Muro:
+      - Global por jugar: Pendiente/Aceptado (de todos)
+      - Mis jugados: Jugado (solo los del usuario)
+    Devuelve sin duplicar por id.
+    """
+    _apply_forfeit_if_expired(db)
+
+    # 1) Global por jugar (todos)
+    global_por_jugar = (
+        db.query(Desafio)
+        .filter(Desafio.estado.in_(["Pendiente", "Aceptado"]))
+        .order_by(Desafio.fecha.desc(), Desafio.hora.desc(), Desafio.id.desc())
+        .all()
+    )
+
+    # 2) Mis jugados (histórico)
+    mis_parejas_ids = (
+        db.query(Pareja.id)
+        .filter(
+            or_(
+                Pareja.jugador1_id == jugador_actual.id,
+                Pareja.jugador2_id == jugador_actual.id,
+            )
+        )
+        .all()
+    )
+    mis_ids = {pid for (pid,) in mis_parejas_ids}
+
+    mis_jugados = []
+    if mis_ids:
+        mis_jugados = (
+            db.query(Desafio)
+            .filter(
+                Desafio.estado == "Jugado",
+                or_(
+                    Desafio.retadora_pareja_id.in_(list(mis_ids)),
+                    Desafio.retada_pareja_id.in_(list(mis_ids)),
+                ),
+            )
+            .order_by(Desafio.fecha_jugado.desc(), Desafio.fecha.desc(), Desafio.hora.desc(), Desafio.id.desc())
+            .all()
+        )
+
+    # 3) Dedup por id
+    seen = set()
+    out: List[Desafio] = []
+    for d in list(global_por_jugar) + list(mis_jugados):
+        if d.id in seen:
+            continue
+        seen.add(d.id)
+        out.append(d)
+
+    return out
+
+
 @router.post("/", response_model=DesafioResponse, status_code=status.HTTP_201_CREATED)
 def crear_desafio(
     payload: DesafioCreateAuto,
@@ -654,13 +713,8 @@ def crear_desafio(
     return nuevo_desafio
 
 
-# ✅✅✅ CORREGIDO: requiere token + solo la dupla desafiada puede aceptar
 @router.post("/{desafio_id}/aceptar", response_model=DesafioResponse)
-def aceptar_desafio(
-    desafio_id: int,
-    db: Session = Depends(get_db),
-    jugador_actual: Jugador = Depends(get_current_jugador),
-):
+def aceptar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     _apply_forfeit_if_expired(db)
 
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
@@ -671,26 +725,14 @@ def aceptar_desafio(
     if desafio.estado != "Pendiente":
         raise HTTPException(status_code=400, detail="Solo se puede aceptar si está Pendiente.")
 
-    retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
-    if not retada:
-        raise HTTPException(status_code=404, detail="Pareja desafiada no encontrada.")
-
-    if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
-        raise HTTPException(status_code=403, detail="Solo la dupla desafiada puede aceptar este desafío.")
-
     desafio.estado = "Aceptado"
     db.commit()
     db.refresh(desafio)
     return desafio
 
 
-# ✅✅✅ CORREGIDO: requiere token + solo la dupla desafiada puede rechazar
 @router.post("/{desafio_id}/rechazar", response_model=DesafioResponse)
-def rechazar_desafio(
-    desafio_id: int,
-    db: Session = Depends(get_db),
-    jugador_actual: Jugador = Depends(get_current_jugador),
-):
+def rechazar_desafio(desafio_id: int, db: Session = Depends(get_db)):
     _apply_forfeit_if_expired(db)
 
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
@@ -702,13 +744,6 @@ def rechazar_desafio(
         raise HTTPException(status_code=400, detail="Este desafío ya está rechazado.")
     if desafio.estado != "Pendiente":
         raise HTTPException(status_code=400, detail="Solo se puede rechazar si está Pendiente.")
-
-    retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
-    if not retada:
-        raise HTTPException(status_code=404, detail="Pareja desafiada no encontrada.")
-
-    if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
-        raise HTTPException(status_code=403, detail="Solo la dupla desafiada puede rechazar este desafío.")
 
     desafio.estado = "Rechazado"
     db.commit()
@@ -1008,22 +1043,48 @@ def listar_desafios_pareja(pareja_id: int, db: Session = Depends(get_db)):
     return desafios
 
 
-# ✅✅✅ CORREGIDO: ya NO devuelve 403 si no sos participante (lectura global del detalle)
+# ✅✅✅ NUEVO: detalle público para muro (sin 403)
+@router.get("/{desafio_id}/publico", response_model=DesafioResponse)
+def obtener_desafio_publico(
+    desafio_id: int,
+    db: Session = Depends(get_db),
+    jugador_actual: Jugador = Depends(get_current_jugador),
+):
+    _apply_forfeit_if_expired(db)
+
+    desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
+    if not desafio:
+        raise HTTPException(status_code=404, detail="Desafío no encontrado.")
+
+    # Solo lectura: no validamos pertenencia
+    return desafio
+
+
 @router.get("/{desafio_id}", response_model=DesafioResponse)
 def obtener_desafio(
     desafio_id: int,
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
-    """
-    Se usa para ver el DETALLE desde el muro global.
-    - No debe bloquear con 403 si el usuario no es participante.
-    - Las acciones siguen protegidas en sus endpoints.
-    """
     _apply_forfeit_if_expired(db)
 
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
+
+    parejas_del_jugador = (
+        db.query(Pareja.id)
+        .filter(
+            or_(
+                Pareja.jugador1_id == jugador_actual.id,
+                Pareja.jugador2_id == jugador_actual.id,
+            )
+        )
+        .all()
+    )
+    mis_parejas_ids = {pid for (pid,) in parejas_del_jugador}
+
+    if desafio.retadora_pareja_id not in mis_parejas_ids and desafio.retada_pareja_id not in mis_parejas_ids:
+        raise HTTPException(status_code=403, detail="No tenés acceso a este desafío.")
 
     return desafio
