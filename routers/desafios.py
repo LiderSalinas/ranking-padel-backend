@@ -196,7 +196,11 @@ def _interdivision_allowed(db: Session, retadora: Pareja, retada: Pareja) -> boo
 
     max_pos_A = (
         db.query(Pareja.posicion_actual)
-        .filter(Pareja.activo.is_(True), Pareja.grupo == grupo_A, Pareja.posicion_actual.isnot(None))
+        .filter(
+            Pareja.activo.is_(True),
+            Pareja.grupo == grupo_A,
+            Pareja.posicion_actual.isnot(None),
+        )
         .order_by(Pareja.posicion_actual.desc())
         .first()
     )
@@ -259,6 +263,32 @@ def _validate_desafio_rules(
             status_code=400,
             detail="Desafío no permitido entre grupos. Solo Top 3 de B puede desafiar a últimas 3 de A (misma categoría).",
         )
+
+
+# ✅✅✅ NUEVO: reglas SOLO para REPROGRAMAR (agenda, no ranking)
+def _validate_reprogramar_rules(
+    db: Session,
+    retadora: Pareja,
+    retada: Pareja,
+    fecha: date,
+    exclude_desafio_id: Optional[int] = None,
+) -> None:
+    """
+    ✅ Reglas para REPROGRAMAR (no para crear):
+      - no cruza Masculino/Femenino
+      - max 2 partidos por semana por pareja (Pendiente/Aceptado/Jugado)
+    ❌ NO valida "3 puestos arriba" ni interdivisión (eso es solo al crear).
+    """
+    if not _same_category(db, retadora, retada):
+        raise HTTPException(status_code=400, detail="No se permiten desafíos entre Masculino y Femenino.")
+
+    c1 = _count_partidos_semana(db, retadora.id, fecha, exclude_desafio_id=exclude_desafio_id)
+    if c1 >= 2:
+        raise HTTPException(status_code=400, detail="Tu dupla ya tiene 2 partidos esta semana.")
+
+    c2 = _count_partidos_semana(db, retada.id, fecha, exclude_desafio_id=exclude_desafio_id)
+    if c2 >= 2:
+        raise HTTPException(status_code=400, detail="La dupla desafiada ya tiene 2 partidos esta semana.")
 
 
 def _tokens_by_players(db: Session, jugador_ids: Set[int]) -> List[str]:
@@ -560,7 +590,7 @@ def muro_desafios(
     # 1) Global por jugar (todos)
     global_por_jugar = (
         db.query(Desafio)
-        .filter(Desafio.estado.in_(["Pendiente", "Aceptado","Jugado"]))
+        .filter(Desafio.estado.in_(["Pendiente", "Aceptado", "Jugado"]))
         .order_by(Desafio.fecha.desc(), Desafio.hora.desc(), Desafio.id.desc())
         .all()
     )
@@ -735,20 +765,17 @@ def aceptar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas.")
 
-   # ✅ Permiso: SOLO la pareja RETADA (desafiado) puede aceptar
+    # ✅ Permiso: SOLO la pareja RETADA (desafiado) puede aceptar
     if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
         raise HTTPException(
-        status_code=403,
-        detail="Solo la dupla desafiada (retada) puede aceptar este desafío.",
-    )
+            status_code=403,
+            detail="Solo la dupla desafiada (retada) puede aceptar este desafío.",
+        )
 
-    
-        
     desafio.estado = "Aceptado"
     db.commit()
     db.refresh(desafio)
     return desafio
-
 
 
 @router.post("/{desafio_id}/rechazar", response_model=DesafioResponse)
@@ -779,12 +806,11 @@ def rechazar_desafio(
 
     # ✅ Permiso: SOLO la pareja RETADA (desafiado) puede rechazar
     if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
-         raise HTTPException(
-        status_code=403,
-        detail="Solo la dupla desafiada (retada) puede rechazar este desafío.",
-     )
+        raise HTTPException(
+            status_code=403,
+            detail="Solo la dupla desafiada (retada) puede rechazar este desafío.",
+        )
 
-         
     desafio.estado = "Rechazado"
     db.commit()
     db.refresh(desafio)
@@ -806,7 +832,10 @@ def reprogramar_desafio(
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
 
     if desafio.estado not in ("Pendiente", "Aceptado"):
-        raise HTTPException(status_code=400, detail="Solo se puede reprogramar si el desafío está Pendiente y Aceptado.")
+        raise HTTPException(
+            status_code=400,
+            detail="Solo se puede reprogramar si el desafío está Pendiente o Aceptado.",
+        )
 
     retadora = db.query(Pareja).filter(Pareja.id == desafio.retadora_pareja_id).first()
     retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
@@ -825,8 +854,8 @@ def reprogramar_desafio(
     nueva_hora = _parse_hora(payload.hora)
     _ensure_hora_redonda(nueva_hora)
 
-    # ✅ revalidar reglas, excluyendo el desafío actual
-    _validate_desafio_rules(db, retadora, retada, payload.fecha, exclude_desafio_id=desafio.id)
+    # ✅ REPROGRAMAR: validar solo reglas de agenda (no ranking), excluyendo el desafío actual
+    _validate_reprogramar_rules(db, retadora, retada, payload.fecha, exclude_desafio_id=desafio.id)
 
     desafio.fecha = payload.fecha
     desafio.hora = nueva_hora
@@ -874,7 +903,6 @@ def reprogramar_desafio(
         )
 
     return desafio
-
 
 
 def _gana_retador(data: ResultadoSets) -> bool:
