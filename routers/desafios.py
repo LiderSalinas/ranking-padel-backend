@@ -560,7 +560,7 @@ def muro_desafios(
     # 1) Global por jugar (todos)
     global_por_jugar = (
         db.query(Desafio)
-        .filter(Desafio.estado.in_(["Pendiente", "Aceptado"]))
+        .filter(Desafio.estado.in_(["Pendiente", "Aceptado","Jugado"]))
         .order_by(Desafio.fecha.desc(), Desafio.hora.desc(), Desafio.id.desc())
         .all()
     )
