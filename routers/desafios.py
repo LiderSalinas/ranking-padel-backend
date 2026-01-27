@@ -718,7 +718,7 @@ def aceptar_desafio(
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
     """
-    ✅ Solo la dupla DESAFIADA puede aceptar.
+    ✅ Ahora: Retadora O Retada pueden aceptar (si pertenecen al partido).
     """
     _apply_forfeit_if_expired(db)
 
@@ -730,17 +730,25 @@ def aceptar_desafio(
     if desafio.estado != "Pendiente":
         raise HTTPException(status_code=400, detail="Solo se puede aceptar si está Pendiente.")
 
+    retadora = db.query(Pareja).filter(Pareja.id == desafio.retadora_pareja_id).first()
     retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
-    if not retada:
-        raise HTTPException(status_code=404, detail="Pareja desafiada no encontrada.")
+    if not retadora or not retada:
+        raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas.")
 
-    if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
-        raise HTTPException(status_code=403, detail="Solo la dupla desafiada puede aceptar este desafío.")
+    # ✅ Permiso: cualquiera que pertenezca a una de las 2 parejas
+    if jugador_actual.id not in (
+        retadora.jugador1_id,
+        retadora.jugador2_id,
+        retada.jugador1_id,
+        retada.jugador2_id,
+    ):
+        raise HTTPException(status_code=403, detail="Solo las parejas del partido pueden aceptar este desafío.")
 
     desafio.estado = "Aceptado"
     db.commit()
     db.refresh(desafio)
     return desafio
+
 
 
 @router.post("/{desafio_id}/rechazar", response_model=DesafioResponse)
@@ -750,7 +758,7 @@ def rechazar_desafio(
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
     """
-    ✅ Solo la dupla DESAFIADA puede rechazar.
+    ✅ Ahora: Retadora O Retada pueden rechazar (si pertenecen al partido).
     """
     _apply_forfeit_if_expired(db)
 
@@ -764,12 +772,19 @@ def rechazar_desafio(
     if desafio.estado != "Pendiente":
         raise HTTPException(status_code=400, detail="Solo se puede rechazar si está Pendiente.")
 
+    retadora = db.query(Pareja).filter(Pareja.id == desafio.retadora_pareja_id).first()
     retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
-    if not retada:
-        raise HTTPException(status_code=404, detail="Pareja desafiada no encontrada.")
+    if not retadora or not retada:
+        raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas.")
 
-    if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
-        raise HTTPException(status_code=403, detail="Solo la dupla desafiada puede rechazar este desafío.")
+    # ✅ Permiso: cualquiera que pertenezca a una de las 2 parejas
+    if jugador_actual.id not in (
+        retadora.jugador1_id,
+        retadora.jugador2_id,
+        retada.jugador1_id,
+        retada.jugador2_id,
+    ):
+        raise HTTPException(status_code=403, detail="Solo las parejas del partido pueden rechazar este desafío.")
 
     desafio.estado = "Rechazado"
     db.commit()
@@ -799,13 +814,14 @@ def reprogramar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
+    # ✅ Permiso: cualquiera que pertenezca a una de las 2 parejas
     if jugador_actual.id not in (
         retadora.jugador1_id,
         retadora.jugador2_id,
         retada.jugador1_id,
         retada.jugador2_id,
     ):
-        raise HTTPException(status_code=403, detail="No pertenecés a este desafío.")
+        raise HTTPException(status_code=403, detail="Solo las parejas del partido pueden reprogramar este desafío.")
 
     nueva_hora = _parse_hora(payload.hora)
     _ensure_hora_redonda(nueva_hora)
@@ -859,6 +875,7 @@ def reprogramar_desafio(
         )
 
     return desafio
+
 
 
 def _gana_retador(data: ResultadoSets) -> bool:
