@@ -805,8 +805,8 @@ def reprogramar_desafio(
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
 
-    if desafio.estado != "Pendiente":
-        raise HTTPException(status_code=400, detail="Solo se puede reprogramar si el desafío está Pendiente.")
+    if desafio.estado != ("Pendiente", "Aceptado"):
+        raise HTTPException(status_code=400, detail="Solo se puede reprogramar si el desafío está Pendiente y Aceptado.")
 
     retadora = db.query(Pareja).filter(Pareja.id == desafio.retadora_pareja_id).first()
     retada = db.query(Pareja).filter(Pareja.id == desafio.retada_pareja_id).first()
