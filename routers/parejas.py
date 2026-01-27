@@ -122,7 +122,154 @@ def _apply_grupo_filter(q, grupo: Optional[str]):
     return q.filter(models.Pareja.grupo == g)
 
 
-# --------- Endpoints ---------
+# =========================================================
+# ✅ ENDPOINTS "ESTÁTICOS" PRIMERO (evita 422 por /{pareja_id})
+# =========================================================
+
+@router.get("/desafiables", response_model=List[ParejaDesafiableResponse])
+def listar_parejas_desafiables(
+    grupo: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    ✅ REAL:
+    Lista parejas desafiables desde la BD.
+    Ahora soporta filtros:
+      - grupo=Femenino | Masculino (categoría)
+      - grupo=Femenino A | Masculino B (exacto)
+    """
+    q = (
+        db.query(models.Pareja)
+        .options(joinedload(models.Pareja.jugador1), joinedload(models.Pareja.jugador2))
+        .filter(models.Pareja.activo.is_(True), models.Pareja.posicion_actual.isnot(None))
+    )
+
+    q = _apply_grupo_filter(q, grupo)
+
+    parejas = q.order_by(models.Pareja.grupo.asc(), models.Pareja.posicion_actual.asc()).all()
+
+    resp: List[ParejaDesafiableResponse] = []
+    for p in parejas:
+        j1 = p.jugador1
+        j2 = p.jugador2
+        resp.append(
+            ParejaDesafiableResponse(
+                id=p.id,
+                nombre=nombre_pareja(j1, j2),
+                posicion_actual=p.posicion_actual or 0,
+                grupo=p.grupo,
+            )
+        )
+
+    return resp
+
+
+@router.get("/cards", response_model=List[ParejaCardResponse])
+def listar_parejas_cards(
+    grupo: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """
+    ✅ Vista pública tipo AppSheet:
+    Cards por pareja con fotos + stats.
+    Filtro:
+      - grupo=Femenino | Masculino (categoría)
+      - grupo=Femenino A | Masculino B (exacto)
+    """
+    q = (
+        db.query(models.Pareja)
+        .options(joinedload(models.Pareja.jugador1), joinedload(models.Pareja.jugador2))
+        .filter(models.Pareja.activo.is_(True), models.Pareja.posicion_actual.isnot(None))
+    )
+
+    q = _apply_grupo_filter(q, grupo)
+
+    parejas = q.order_by(models.Pareja.grupo.asc(), models.Pareja.posicion_actual.asc()).all()
+
+    resp: List[ParejaCardResponse] = []
+
+    for p in parejas:
+        j1 = p.jugador1
+        j2 = p.jugador2
+
+        # Stats reales: desafíos jugados donde participó
+        desafios = (
+            db.query(models.Desafio)
+            .filter(
+                models.Desafio.estado == "Jugado",
+                or_(
+                    models.Desafio.retadora_pareja_id == p.id,
+                    models.Desafio.retada_pareja_id == p.id,
+                ),
+            )
+            .all()
+        )
+
+        partidos_jugados = len(desafios)
+        victorias = sum(1 for d in desafios if d.ganador_pareja_id == p.id)
+        derrotas = partidos_jugados - victorias
+
+        resp.append(
+            ParejaCardResponse(
+                pareja_id=p.id,
+                grupo=p.grupo,
+                posicion_actual=p.posicion_actual or 0,
+                activo=p.activo,
+                nombre_pareja=f"{j1.nombre} {j1.apellido} / {j2.nombre} {j2.apellido}",
+                jugador1=JugadorEnPareja(
+                    id=j1.id,
+                    nombre=j1.nombre,
+                    apellido=j1.apellido,
+                    telefono=j1.telefono,
+                    email=j1.email,
+                    foto_url=j1.foto_url,
+                ),
+                jugador2=JugadorEnPareja(
+                    id=j2.id,
+                    nombre=j2.nombre,
+                    apellido=j2.apellido,
+                    telefono=j2.telefono,
+                    email=j2.email,
+                    foto_url=j2.foto_url,
+                ),
+                partidos_jugados=partidos_jugados,
+                victorias=victorias,
+                derrotas=derrotas,
+            )
+        )
+
+    return resp
+
+
+@router.get("/ranking/{grupo}", response_model=List[ParejaResponse])
+def obtener_ranking_por_grupo(
+    grupo: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Devuelve el ranking de parejas de un grupo (solo activas),
+    ordenado por posicion_actual ascendente.
+    """
+    parejas = (
+        db.query(models.Pareja)
+        .filter(
+            models.Pareja.grupo == grupo,
+            models.Pareja.activo.is_(True),
+        )
+        .order_by(models.Pareja.posicion_actual.asc())
+        .all()
+    )
+
+    if not parejas:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No se encontraron parejas activas en el grupo {grupo}.",
+        )
+
+    return parejas
+
+
+# --------- CRUD / Listados generales ---------
 @router.post(
     "/registrar",
     response_model=ParejaResponse,
@@ -215,33 +362,9 @@ def listar_parejas(
     return parejas
 
 
-@router.get("/ranking/{grupo}", response_model=List[ParejaResponse])
-def obtener_ranking_por_grupo(
-    grupo: str,
-    db: Session = Depends(get_db),
-):
-    """
-    Devuelve el ranking de parejas de un grupo (solo activas),
-    ordenado por posicion_actual ascendente.
-    """
-    parejas = (
-        db.query(models.Pareja)
-        .filter(
-            models.Pareja.grupo == grupo,
-            models.Pareja.activo.is_(True),
-        )
-        .order_by(models.Pareja.posicion_actual.asc())
-        .all()
-    )
-
-    if not parejas:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No se encontraron parejas activas en el grupo {grupo}.",
-        )
-
-    return parejas
-
+# =========================================================
+# ✅ RUTAS DINÁMICAS AL FINAL (para que no pisen /desafiables)
+# =========================================================
 
 @router.get("/{pareja_id}/historial", response_model=ParejaHistorialResponse)
 def obtener_historial_pareja(
@@ -378,118 +501,3 @@ def obtener_detalle_pareja(
         victorias=victorias,
         derrotas=derrotas,
     )
-
-
-@router.get("/desafiables", response_model=List[ParejaDesafiableResponse])
-def listar_parejas_desafiables(
-    grupo: Optional[str] = None,
-    db: Session = Depends(get_db),
-):
-    """
-    ✅ REAL:
-    Lista parejas desafiables desde la BD.
-    Ahora soporta filtros:
-      - grupo=Femenino | Masculino (categoría)
-      - grupo=Femenino A | Masculino B (exacto)
-    """
-    q = (
-        db.query(models.Pareja)
-        .options(joinedload(models.Pareja.jugador1), joinedload(models.Pareja.jugador2))
-        .filter(models.Pareja.activo.is_(True), models.Pareja.posicion_actual.isnot(None))
-    )
-
-    q = _apply_grupo_filter(q, grupo)
-
-    parejas = q.order_by(models.Pareja.grupo.asc(), models.Pareja.posicion_actual.asc()).all()
-
-    resp: List[ParejaDesafiableResponse] = []
-    for p in parejas:
-        j1 = p.jugador1
-        j2 = p.jugador2
-        resp.append(
-            ParejaDesafiableResponse(
-                id=p.id,
-                nombre=nombre_pareja(j1, j2),
-                posicion_actual=p.posicion_actual or 0,
-                grupo=p.grupo,
-            )
-        )
-
-    return resp
-
-
-@router.get("/cards", response_model=List[ParejaCardResponse])
-def listar_parejas_cards(
-    grupo: str | None = None,
-    db: Session = Depends(get_db),
-):
-    """
-    ✅ Vista pública tipo AppSheet:
-    Cards por pareja con fotos + stats.
-    Filtro:
-      - grupo=Femenino | Masculino (categoría)
-      - grupo=Femenino A | Masculino B (exacto)
-    """
-    q = (
-        db.query(models.Pareja)
-        .options(joinedload(models.Pareja.jugador1), joinedload(models.Pareja.jugador2))
-        .filter(models.Pareja.activo.is_(True), models.Pareja.posicion_actual.isnot(None))
-    )
-
-    q = _apply_grupo_filter(q, grupo)
-
-    parejas = q.order_by(models.Pareja.grupo.asc(), models.Pareja.posicion_actual.asc()).all()
-
-    resp: List[ParejaCardResponse] = []
-
-    for p in parejas:
-        j1 = p.jugador1
-        j2 = p.jugador2
-
-        # Stats reales: desafíos jugados donde participó
-        desafios = (
-            db.query(models.Desafio)
-            .filter(
-                models.Desafio.estado == "Jugado",
-                or_(
-                    models.Desafio.retadora_pareja_id == p.id,
-                    models.Desafio.retada_pareja_id == p.id,
-                ),
-            )
-            .all()
-        )
-
-        partidos_jugados = len(desafios)
-        victorias = sum(1 for d in desafios if d.ganador_pareja_id == p.id)
-        derrotas = partidos_jugados - victorias
-
-        resp.append(
-            ParejaCardResponse(
-                pareja_id=p.id,
-                grupo=p.grupo,
-                posicion_actual=p.posicion_actual or 0,
-                activo=p.activo,
-                nombre_pareja=f"{j1.nombre} {j1.apellido} / {j2.nombre} {j2.apellido}",
-                jugador1=JugadorEnPareja(
-                    id=j1.id,
-                    nombre=j1.nombre,
-                    apellido=j1.apellido,
-                    telefono=j1.telefono,
-                    email=j1.email,
-                    foto_url=j1.foto_url,
-                ),
-                jugador2=JugadorEnPareja(
-                    id=j2.id,
-                    nombre=j2.nombre,
-                    apellido=j2.apellido,
-                    telefono=j2.telefono,
-                    email=j2.email,
-                    foto_url=j2.foto_url,
-                ),
-                partidos_jugados=partidos_jugados,
-                victorias=victorias,
-                derrotas=derrotas,
-            )
-        )
-
-    return resp
