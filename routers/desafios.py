@@ -388,6 +388,8 @@ def _apply_forfeit_if_expired(db: Session) -> int:
     """
     Regla: el desafiado tiene 3 días para aceptar/rechazar.
     Si vence y sigue Pendiente -> pierde posición automáticamente (gana retador).
+    ✅ FIX: marcamos W.O. en observación para que el frontend muestre "W.O." y no quede "Resultado: —"
+    ✅ FIX: protegemos para no tocar desafíos que ya tienen ganador/fecha_jugado (evita estados raros).
     """
     now = datetime.utcnow()
     limite = now - timedelta(days=3)
@@ -397,6 +399,8 @@ def _apply_forfeit_if_expired(db: Session) -> int:
         .filter(
             Desafio.estado == "Pendiente",
             Desafio.created_at <= limite,
+            Desafio.ganador_pareja_id.is_(None),
+            Desafio.fecha_jugado.is_(None),
         )
         .all()
     )
@@ -422,6 +426,13 @@ def _apply_forfeit_if_expired(db: Session) -> int:
         d.estado = "Jugado"
         d.ganador_pareja_id = retadora.id
         d.fecha_jugado = date.today()
+
+        # ✅ MARCAR W.O. (sin tocar sets int)
+        wo_msg = "W.O. automático: desafiado no respondió en 3 días."
+        obs = (d.observacion or "").strip()
+        # evitamos duplicar si ya estaba
+        if wo_msg not in obs:
+            d.observacion = f"{obs}\n{wo_msg}".strip() if obs else wo_msg
 
         # aplicar swap como si retador ganó
         if retadora.posicion_actual is not None and retada.posicion_actual is not None:
@@ -581,13 +592,12 @@ def muro_desafios(
 ):
     """
     Muro:
-      - Global por jugar: Pendiente/Aceptado (de todos)
+      - Global por jugar: Pendiente/Aceptado/Jugado (de todos)
       - Mis jugados: Jugado (solo los del usuario)
     Devuelve sin duplicar por id.
     """
     _apply_forfeit_if_expired(db)
 
-    # 1) Global por jugar (todos)
     global_por_jugar = (
         db.query(Desafio)
         .filter(Desafio.estado.in_(["Pendiente", "Aceptado", "Jugado"]))
@@ -595,7 +605,6 @@ def muro_desafios(
         .all()
     )
 
-    # 2) Mis jugados (histórico)
     mis_parejas_ids = (
         db.query(Pareja.id)
         .filter(
@@ -628,7 +637,6 @@ def muro_desafios(
             .all()
         )
 
-    # 3) Dedup por id
     seen = set()
     out: List[Desafio] = []
     for d in list(global_por_jugar) + list(mis_jugados):
@@ -649,7 +657,6 @@ def crear_desafio(
 ):
     _apply_forfeit_if_expired(db)
 
-    # ✅ retadora automática por token
     retadora = (
         db.query(Pareja)
         .filter(
@@ -682,7 +689,6 @@ def crear_desafio(
     hora_parsed = _parse_hora(str(payload.hora))
     _ensure_hora_redonda(hora_parsed)
 
-    # ✅ REGLAS DURAS (siempre)
     _validate_desafio_rules(db, retadora, retada, payload.fecha)
 
     label_retadora = _pareja_label(db, retadora)
@@ -747,9 +753,6 @@ def aceptar_desafio(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
-    """
-    ✅ Ahora: Retadora O Retada pueden aceptar (si pertenecen al partido).
-    """
     _apply_forfeit_if_expired(db)
 
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
@@ -765,7 +768,6 @@ def aceptar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas.")
 
-    # ✅ Permiso: SOLO la pareja RETADA (desafiado) puede aceptar
     if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
         raise HTTPException(
             status_code=403,
@@ -784,9 +786,6 @@ def rechazar_desafio(
     db: Session = Depends(get_db),
     jugador_actual: Jugador = Depends(get_current_jugador),
 ):
-    """
-    ✅ Ahora: Retadora O Retada pueden rechazar (si pertenecen al partido).
-    """
     _apply_forfeit_if_expired(db)
 
     desafio = db.query(Desafio).filter(Desafio.id == desafio_id).first()
@@ -804,7 +803,6 @@ def rechazar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas.")
 
-    # ✅ Permiso: SOLO la pareja RETADA (desafiado) puede rechazar
     if jugador_actual.id not in (retada.jugador1_id, retada.jugador2_id):
         raise HTTPException(
             status_code=403,
@@ -842,7 +840,6 @@ def reprogramar_desafio(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
-    # ✅ Permiso: cualquiera que pertenezca a una de las 2 parejas
     if jugador_actual.id not in (
         retadora.jugador1_id,
         retadora.jugador2_id,
@@ -854,7 +851,6 @@ def reprogramar_desafio(
     nueva_hora = _parse_hora(payload.hora)
     _ensure_hora_redonda(nueva_hora)
 
-    # ✅ REPROGRAMAR: validar solo reglas de agenda (no ranking), excluyendo el desafío actual
     _validate_reprogramar_rules(db, retadora, retada, payload.fecha, exclude_desafio_id=desafio.id)
 
     desafio.fecha = payload.fecha
@@ -971,15 +967,12 @@ def cargar_resultado(
     if not retadora or not retada:
         raise HTTPException(status_code=404, detail="Parejas del desafío no encontradas")
 
-    # ✅ No cruzar Masculino/Femenino
     if not _same_category(db, retadora, retada):
         raise HTTPException(status_code=400, detail="No se puede jugar entre Masculino y Femenino.")
 
-    # ✅ Si es interdivisión, debe ser permitido
     if retadora.grupo != retada.grupo and not _interdivision_allowed(db, retadora, retada):
         raise HTTPException(status_code=400, detail="No se puede aplicar resultado: interdivisión no permitida.")
 
-    # ✅ Solo participantes pueden cargar resultado
     if jugador_actual.id not in (
         retadora.jugador1_id,
         retadora.jugador2_id,
@@ -1010,9 +1003,6 @@ def cargar_resultado(
 
     desafio.fecha_jugado = data.fecha_jugado or date.today()
 
-    # ✅ Aplicación de ranking:
-    # - mismo grupo: si gana retador => swap posiciones
-    # - interdivisión B->A: si gana retador => swap grupo+pos entre ambos
     if retador_gana and not desafio.swap_aplicado:
         if retadora.posicion_actual is not None and retada.posicion_actual is not None:
             if retadora.grupo != retada.grupo and _interdivision_allowed(db, retadora, retada):
@@ -1130,6 +1120,4 @@ def obtener_desafio(
     if not desafio:
         raise HTTPException(status_code=404, detail="Desafío no encontrado.")
 
-    # 🔓 Antes: 403 si no pertenecés.
-    # Ahora: permitimos lectura a cualquier usuario autenticado.
     return desafio
