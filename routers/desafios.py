@@ -390,6 +390,7 @@ def _apply_forfeit_if_expired(db: Session) -> int:
     Si vence y sigue Pendiente -> pierde posición automáticamente (gana retador).
     ✅ FIX: marcamos W.O. en observación para que el frontend muestre "W.O." y no quede "Resultado: —"
     ✅ FIX: protegemos para no tocar desafíos que ya tienen ganador/fecha_jugado (evita estados raros).
+    ✅ FIX NUEVO: persistimos puesto_en_juego para que el detalle no quede en null.
     """
     now = datetime.utcnow()
     limite = now - timedelta(days=3)
@@ -421,6 +422,12 @@ def _apply_forfeit_if_expired(db: Session) -> int:
 
         d.pos_retadora_old = retadora.posicion_actual
         d.pos_retada_old = retada.posicion_actual
+
+        # ✅ NUEVO: setear puesto_en_juego
+        if d.pos_retadora_old is not None and d.pos_retada_old is not None:
+            d.puesto_en_juego = min(d.pos_retadora_old, d.pos_retada_old)
+        else:
+            d.puesto_en_juego = None
 
         # gana retador por forfeit
         d.estado = "Jugado"
@@ -990,6 +997,9 @@ def cargar_resultado(
     puesto_en_juego = None
     if desafio.pos_retadora_old is not None and desafio.pos_retada_old is not None:
         puesto_en_juego = min(desafio.pos_retadora_old, desafio.pos_retada_old)
+
+    # ✅✅✅ FIX CLAVE: persistimos en DB (antes quedaba solo en variable)
+    desafio.puesto_en_juego = puesto_en_juego
 
     desafio.estado = "Jugado"
     desafio.ganador_pareja_id = ganador_id
